@@ -8,28 +8,34 @@
 
 export const CELL = 3, HEIGHT = 2.8, THICK = 0.1;
 
-// 32-bit integer hash of up to four ints -> [0, 1)
-export function hash(a, b, c, d) {
+// 32-bit integer hash of four ints -> uint32. shaders.js has an exact WGSL copy (hashU), and the
+// wall rules below use only integer maths, so the GPU computes the very same walls (for light occlusion).
+export function hashU(a, b, c, d) {
   let h = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b);
   h = Math.imul(h ^ (h >>> 13) ^ b, 0xc2b2ae35);
   h = Math.imul(h ^ (h >>> 16) ^ c, 0x27d4eb2f);
   h = Math.imul(h ^ (h >>> 15) ^ d, 0x165667b1);
-  h ^= h >>> 16;
-  return (h >>> 0) / 4294967296;
+  return (h ^ (h >>> 16)) >>> 0;
 }
+export const hash = (a, b, c, d) => hashU(a, b, c, d) / 4294967296;   // -> [0, 1)
 
-// One grid line: walls come in runs. Each line has its own run length and phase, a run is solid with
-// probability DENSITY, and single edges are knocked out as doorways.
-const DENSITY = 0.35, DOOR = 0.35;   // ~95% of cells reachable; the sealed-off pockets are kept on purpose
+// One grid line: walls come in runs. Each line has its own run length (2..6 cells) and phase, a run
+// is solid with probability DENSITY, and single edges are knocked out as doorways. ~95% of cells end
+// up reachable; the sealed-off pockets are kept on purpose.
+export const DENSITY_U = Math.floor(0.35 * 2 ** 32), DOOR_U = Math.floor(0.35 * 2 ** 32);
 function lineWall(seed, salt, line, along) {
-  const len = 2 + Math.floor(hash(seed, salt, line, 1) * 5);      // 2..6 cells
-  const off = Math.floor(hash(seed, salt, line, 2) * len);
+  const len = 2 + hashU(seed, salt, line, 1) % 5;
+  const off = hashU(seed, salt, line, 2) % len;
   const run = Math.floor((along + off) / len);
-  if (hash(seed, salt + 7, line, run) >= DENSITY) return false;
-  return hash(seed, salt + 13, line, along) >= DOOR;
+  if (hashU(seed, salt + 7, line, run) >= DENSITY_U) return false;
+  return hashU(seed, salt + 13, line, along) >= DOOR_U;
 }
 export const wallH = (seed, x, z) => lineWall(seed, 101, z, x);
 export const wallV = (seed, x, z) => lineWall(seed, 202, x, z);
+
+// Ceiling panel in cell (x, z) is working. Same rule in the shader. (Step 4 adds flicker zones.)
+export const PANEL_U = Math.floor(0.8 * 2 ** 32);
+export const panelOn = (seed, x, z) => hashU(seed, 303, x, z) < PANEL_U;
 
 // The world is streamed in square chunks of CHUNK x CHUNK cells. A chunk owns the horizontal edges on
 // lines z0..z1-1 and the vertical edges on lines x0..x1-1 inside it, so every edge belongs to exactly
