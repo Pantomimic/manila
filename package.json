@@ -1,0 +1,13 @@
+{
+  "name": "backrooms",
+  "private": true,
+  "description": "Endless procedural backrooms, rendered with WebGPU, bundled into one HTML file",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:readable": "node build.mjs --readable"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.0"
+  }
+}
