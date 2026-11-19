@@ -13,6 +13,8 @@
   #menu small { opacity: .7; }
   #menu.off { display: none; }
   #hud { position: fixed; left: 12px; bottom: 10px; font: 12px ui-monospace, monospace; opacity: .55; pointer-events: none; white-space: pre; }
+  #vl { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  #vol { width: 180px; accent-color: #e9dfb8; }
   #err { color: #ffb4a0; max-width: 520px; }
 </style>
 </head>
@@ -21,6 +23,7 @@
 <div id="menu">
   <h1>Backrooms</h1>
   <button id="go">Enter</button>
+  <label id="vl">Volume <input id="vol" type="range" min="0" max="100" value="50"></label>
   <small>WASD move &middot; mouse look &middot; Shift run &middot; M mute &middot; H stats &middot; Esc menu</small>
   <small id="err"></small>
 </div>

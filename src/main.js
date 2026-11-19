@@ -40,7 +40,11 @@ async function start() {
   addEventListener('keyup', (e) => keys.delete(e.code));
   addEventListener('blur', () => keys.clear());
   // sound starts on the first click (browsers only allow audio after a user gesture)
-  const wake = () => { try { if (!audio) audio = createAudio(); audio.resume(); } catch (e) { console.warn('no audio', e); } };
+  const volEl = $('vol');
+  try { const v = localStorage.getItem('backrooms.volume'); if (v !== null) volEl.value = v; } catch {}
+  const vol = () => volEl.value / 100;
+  volEl.oninput = () => { if (audio) audio.setVolume(vol()); try { localStorage.setItem('backrooms.volume', volEl.value); } catch {} };
+  const wake = () => { try { if (!audio) { audio = createAudio(); audio.setVolume(vol()); } audio.resume(); } catch (e) { console.warn('no audio', e); } };
   $('go').onclick = () => { wake(); canvas.requestPointerLock(); };
   canvas.onclick = () => { wake(); if (!document.pointerLockElement) canvas.requestPointerLock(); };
   document.addEventListener('pointerlockchange', () => { menu.classList.toggle('off', document.pointerLockElement === canvas); keys.clear(); });

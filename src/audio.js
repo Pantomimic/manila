@@ -6,7 +6,9 @@ import { CELL, lightKind, lightLevel } from './gen.js';
 
 export function createAudio() {
   const ac = new (window.AudioContext || window.webkitAudioContext)();
-  const master = ac.createGain(); master.gain.value = 0.8; master.connect(ac.destination);
+  let vol = 0.5, muted = false;
+  const level = () => muted ? 0 : vol * vol;           // squared: the slider feels even
+  const master = ac.createGain(); master.gain.value = level(); master.connect(ac.destination);
 
   // white noise buffer, shared by the room tone and the crackle
   const nb = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate), nd = nb.getChannelData(0);
@@ -22,7 +24,7 @@ export function createAudio() {
   }
   // a thin high whine on top of the hum
   const whine = ac.createOscillator(); whine.frequency.value = 7820;
-  const wg = ac.createGain(); wg.gain.value = 0.004; whine.connect(wg).connect(hum); whine.start();
+  const wg = ac.createGain(); wg.gain.value = 0.0015; whine.connect(wg).connect(hum); whine.start();
 
   // crackle: buzzing arc of a failing starter, gated by the flicker state
   const crackle = ac.createGain(); crackle.gain.value = 0; crackle.connect(master);
@@ -36,10 +38,10 @@ export function createAudio() {
   const rlp = ac.createBiquadFilter(); rlp.type = 'lowpass'; rlp.frequency.value = 160; rlp.connect(room);
   noise().connect(rlp);
 
-  let muted = false;
   return {
     resume() { if (ac.state !== 'running') ac.resume(); },
-    toggleMute() { muted = !muted; master.gain.setTargetAtTime(muted ? 0 : 0.8, ac.currentTime, 0.05); return muted; },
+    toggleMute() { muted = !muted; master.gain.setTargetAtTime(level(), ac.currentTime, 0.05); return muted; },
+    setVolume(v) { vol = v; master.gain.setTargetAtTime(level(), ac.currentTime, 0.05); },
     // listener at (x, z) metres, t = the same clock the shader flickers by
     update(seed, x, z, t) {
       const cx = Math.floor(x / CELL), cz = Math.floor(z / CELL);
@@ -59,7 +61,7 @@ export function createAudio() {
       }
       const now = ac.currentTime;
       hum.gain.setTargetAtTime(Math.min(0.06, steady * 0.022), now, 0.08);
-      crackle.gain.setTargetAtTime(Math.min(0.12, flick * 0.09), now, 0.012);
+      crackle.gain.setTargetAtTime(Math.min(0.05, flick * 0.04), now, 0.012);
     },
   };
 }
