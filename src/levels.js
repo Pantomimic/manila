@@ -7,7 +7,7 @@
 // and "wrong" objects (a backwards stop sign stuck in the carpet, desks sunk into the floor or through
 // a wall, stretched chairs, a chair on the ceiling, a door frame standing on its own).
 // Everything here is a pure function of (seed, level, cell), like the walls in gen.js.
-import { CELL, HEIGHT, THICK, CHUNK, hashU, buildChunk, lightKind, kindH, kindV, wallLike, mutation, MUT_STEP, MUT_LEVEL, noteLevel, roomCell } from './gen.js';
+import { CELL, HEIGHT, THICK, CHUNK, hashU, reaches, buildChunk, lightKind, kindH, kindV, wallLike, mutation, MUT_STEP, MUT_LEVEL, noteLevel, roomCell } from './gen.js';
 import * as G from './gen.js';                // live room bounds (G.rX0 ..) after roomCell
 export { mutation, MUT_STEP, MUT_LEVEL };
 
@@ -27,8 +27,18 @@ const STAIR_U = U(0.006);
 // raw rolls; the rules below keep a cell from holding two openings that would fight
 const S = (seed, lv, x, z) => hashU(seed, 910 + lv * 31, x, z) < STAIR_U;
 const D = (seed, lv, x, z) => hashU(seed, 920 + lv * 31, x, z) < DROP_U[mutation(lv, x, z)];
-export const stairAt = (seed, lv, x, z) => S(seed, lv, x, z) && !S(seed, lv - 1, x, z);
-export const dropAt = (seed, lv, x, z) => D(seed, lv, x, z) && !S(seed, lv, x, z) && !S(seed, lv - 1, x, z);
+// ...and no opening may lead into a sealed pocket: the cell you arrive in (the one above a stair,
+// below a hole) must join at least OPEN_NEED cells. Flood fills are cached; only rolled cells get one.
+const OPEN_NEED = 60, openCache = new Map();
+export function openTo(seed, lv, x, z) {
+  const key = (lv + 512) * 2 ** 42 + (x + 2 ** 20) * 2 ** 21 + (z + 2 ** 20);
+  let v = openCache.get(key);
+  if (v === undefined) { v = reaches(levelSeed(seed, lv), x, z, OPEN_NEED); openCache.set(key, v); }
+  return v;
+}
+const S2 = (seed, lv, x, z) => S(seed, lv, x, z) && !S(seed, lv - 1, x, z);
+export const stairAt = (seed, lv, x, z) => S2(seed, lv, x, z) && openTo(seed, lv + 1, x, z);
+export const dropAt = (seed, lv, x, z) => D(seed, lv, x, z) && !S(seed, lv, x, z) && !S(seed, lv - 1, x, z) && openTo(seed, lv - 1, x, z);
 
 // Stair in cell (x, z) of level lv, written into st: [dx, dz, half width, steps, open0, variant].
 // It climbs FH over RUN metres along (dx, dz), centred in the cell. Variants: 0 normal, 1 a few
@@ -71,7 +81,8 @@ export function floorHole(seed, lv, x, z, r) {
 // pit room: every cell but the outer ring is a hole, leaving walkways PIT_EDGE * 2 wide between them
 const PIT_EDGE = 0.4;
 function pitAt(seed, lv, x, z) {
-  return roomCell(levelSeed(seed, lv), x, z) === 0 && x > G.rX0 && x < G.rX1 - 1 && z > G.rZ0 && z < G.rZ1 - 1 && !stairAt(seed, lv, x, z);
+  return roomCell(levelSeed(seed, lv), x, z) === 0 && x > G.rX0 && x < G.rX1 - 1 && z > G.rZ0 && z < G.rZ1 - 1 && !stairAt(seed, lv, x, z)
+    && openTo(seed, lv - 1, x, z);
 }
 export const ceilHole = (seed, lv, x, z, r) => floorHole(seed, lv + 1, x, z, r);
 const rH = new Float64Array(4);
@@ -168,8 +179,16 @@ function pushCircle(pos, r, x, z, cr) {
 }
 // props and special-room furniture push you out (circles; allocation free, runs every frame)
 let cPos = null, cR = 0;
-const solidOf = (type, px, py, pz, yaw, pitch, roll, sr) => {
+const solidOf = (type, px, py, pz, yaw, pitch, roll, sr, len) => {
   if (sr <= 0) return;
+  if (type === ITEM_PART) {                       // thin wall: push out of its box
+    const hx = yaw === 0 ? len : 0.04, hz = yaw === 0 ? 0.04 : len;
+    const qx = Math.min(Math.max(cPos[0], px - hx), px + hx), qz = Math.min(Math.max(cPos[1], pz - hz), pz + hz);
+    const dx = cPos[0] - qx, dz = cPos[1] - qz, d = Math.hypot(dx, dz);
+    if (d < cR && d > 1e-6) { cPos[0] = qx + dx / d * cR; cPos[1] = qz + dz / d * cR; }
+    else if (d <= 1e-6) { if (yaw === 0) cPos[1] = pz + (cPos[1] >= pz ? 1 : -1) * (hz + cR); else cPos[0] = px + (cPos[0] >= px ? 1 : -1) * (hx + cR); }
+    return;
+  }
   if (type === ITEM_FRAME) {
     const c = Math.cos(yaw) * 0.62, sn = Math.sin(yaw) * 0.62;
     pushCircle(cPos, cR, px + c, pz - sn, sr); pushCircle(cPos, cR, px - c, pz + sn, sr);
@@ -189,13 +208,13 @@ export function collideProps(seed, lv, pos, r) {
 // furnish() calls emit(type, x, y, z, yaw, pitch, roll, solidRadius) for each item in cell (x, z):
 // x, z in metres, y = offset from the floor (negative: sunk into it). Used for both the geometry and
 // collision, so they always agree. Further out, more items come out wrong.
-export const ITEM_DESK = 0, ITEM_CHAIR = 1, ITEM_PILLAR = 2, ITEM_FRAME = 3;
+export const ITEM_DESK = 0, ITEM_CHAIR = 1, ITEM_PILLAR = 2, ITEM_FRAME = 3, ITEM_PART = 4;   // PART: extra arg = half length
 const PI = Math.PI;
 const isWrong = (sL, k, x, z, f) => hashU(sL, 830 + k, x, z) < U(0.03 + 0.35 * f);
 const rnd = (sL, k, x, z) => unit(hashU(sL, 860 + k, x, z));
 export function furnish(seed, lv, x, z, emit) {
   const sL = levelSeed(seed, lv), t = roomCell(sL, x, z);
-  if (t < 1) return;
+  if (t < 1 || t === 6 || t === 7) return;           // red and wet rooms are all in the shader
   const x0 = G.rX0, z0 = G.rZ0, x1 = G.rX1, rh = G.rH, z1 = G.rZ1;   // copied: the calls below move the room cache
   const dir = (rh >>> 8) & 3, yaw0 = dir * PI / 2, f = mutation(lv, x, z) / 8;
   const mx = (x + 0.5) * CELL, mz = (z + 0.5) * CELL;
@@ -231,6 +250,24 @@ export function furnish(seed, lv, x, z, emit) {
   if (t === 4) {                                    // dark room: one chair under the one light
     if (x !== (x0 + x1 - 1) >> 1 || z !== (z0 + z1 - 1) >> 1) return;
     emit(ITEM_CHAIR, mx, 0, mz, rnd(sL, 0, x, z) * 2 * PI, 0, 0, 0.35);
+    return;
+  }
+  if (t === 8) {                                    // cubicles: partitions on the inner edges, a gap at one end
+    for (let k = 0; k < 2; k++) {
+      const hor = k === 0;
+      if (hor ? z === z0 : x === x0) continue;
+      const h = hashU(sL, 870 + k, x, z);
+      if (h % 10 < 3) continue;                      // some partitions missing
+      const gapAtStart = (h >>> 8) & 1, a0 = gapAtStart ? 0.9 : 0.05, a1 = gapAtStart ? CELL - 0.05 : CELL - 0.9;
+      const c = (a0 + a1) / 2, half = (a1 - a0) / 2, w = isWrong(sL, 4 + k, x, z, f);
+      if (hor) emit(ITEM_PART, x * CELL + c, w ? -0.6 : 0, z * CELL, 0, 0, 0, 1, half);
+      else emit(ITEM_PART, x * CELL, w ? -0.6 : 0, z * CELL + c, PI / 2, 0, 0, 1, half);
+    }
+    if (hashU(sL, 872, x, z) % 2 === 0) {
+      const w = isWrong(sL, 0, x, z, f), u = rnd(sL, 0, x, z);
+      emit(ITEM_DESK, mx + 0.3, w ? -0.4 : 0, mz + 0.3, yaw0 + (w ? (u - 0.5) * 2 : 0), 0, 0, 0.8);
+      emit(ITEM_CHAIR, mx + 0.3 + Math.sin(yaw0) * 0.62, 0, mz + 0.3 + Math.cos(yaw0) * 0.62, yaw0 + PI + (u - 0.5) * 0.6, 0, 0, 0);
+    }
     return;
   }
   if (t === 5) {                                    // frames: in step, or sinking row by row
@@ -288,9 +325,11 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     OB(loc(R, o, [0.62, top / 2, 0]), [0.17, top / 2, THICK], R, 2);
     OB(loc(R, o, [0, (top + lb) / 2, 0]), [0.45, (top - lb) / 2, THICK], R, 2);
   };
-  const build = (type, px, py, pz, yaw, pitch, roll) => {
+  const build = (type, px, py, pz, yaw, pitch, roll, sr, len) => {
     const R = rot(yaw, pitch, roll), o = [px, y0 + py, pz];
-    if (type === ITEM_CHAIR) chairLite(o, R);
+    if (type === ITEM_PART) {                    // partition 1.5 m tall, cut off at the floor if sunk
+      const top = 1.5 + py; if (top > 0.02) OB([px, y0 + top / 2, pz], [len, top / 2, 0.035], R, 12);
+    } else if (type === ITEM_CHAIR) chairLite(o, R);
     else if (type === ITEM_FRAME) { o[1] = y0; frame(o, R, -py); }
     else if (type === ITEM_PILLAR) OB([px, y0 + (py + HEIGHT) / 2, pz], [0.25, (HEIGHT - py) / 2, 0.25], R, 2);
     else {                                         // desk with side panels, modesty panel and a monitor

@@ -54,7 +54,9 @@ const mutF = (seed, x, z) => mutation(lvOf(seed), x, z) / 8;          // 0..1
 //   1 office: rows of desks and chairs     2 chairs: an audience of chairs all facing one wall
 //   3 pillars: a column at every inner grid point     4 dark: every light out but one
 //   5 frames: a door frame standing in every cell, all facing the same way
-export const RB = 12, ROOM_THEMES = 6;
+//   6 red: the lights burn red        7 wet: the carpet is soaked and shines, the walls wick damp
+//   8 cubicles: a farm of chest-high partitions, desks in some of the stalls
+export const RB = 12, ROOM_THEMES = 9;
 let rSeed = -1, rBX = 1e9, rBZ = 1e9, rOn = false;
 export let rX0 = 0, rZ0 = 0, rX1 = 0, rZ1 = 0, rTheme = 0, rH = 0;
 function roomAt(seed, bx, bz) {
@@ -64,7 +66,7 @@ function roomAt(seed, bx, bz) {
   rOn = hashU(seed, 800, bx, bz) < U(0.14 + 0.03 * m);
   if (!rOn) return false;
   rTheme = hashU(seed, 805, bx, bz) % ROOM_THEMES; rH = hashU(seed, 806, bx, bz);
-  const big = rTheme === 1 || rTheme === 2 ? 2 : 4;               // furniture rooms stay smaller (vertex budget)
+  const big = rTheme === 1 || rTheme === 2 || rTheme === 8 ? 2 : 4;               // furniture rooms stay smaller (vertex budget)
   const w = 4 + hashU(seed, 801, bx, bz) % big, d = 4 + hashU(seed, 802, bx, bz) % big;
   rX0 = bx * RB + 1 + hashU(seed, 803, bx, bz) % (RB - 1 - w); rX1 = rX0 + w;
   rZ0 = bz * RB + 1 + hashU(seed, 804, bx, bz) % (RB - 1 - d); rZ1 = rZ0 + d;
@@ -457,6 +459,20 @@ function push(pos, r, ax, az, bx, bz) {
   // centre inside the slab: leave by the nearest face
   const l = pos[0] - ax + r, rr = bx - pos[0] + r, u = pos[1] - az + r, dn = bz - pos[1] + r, m = Math.min(l, rr, u, dn);
   if (m === l) pos[0] -= l; else if (m === rr) pos[0] += rr; else if (m === u) pos[1] -= u; else pos[1] += dn;
+}
+
+// Can you walk from cell (x, z) to at least `need` cells? Used so holes and stairs never drop you
+// into a sealed pocket. Allocates; callers cache the answer.
+export function reaches(seed, x0, z0, need) {
+  const K = (x, z) => (x + 1048576) * 2097152 + (z + 1048576);
+  const seen = new Set([K(x0, z0)]), stack = [x0, z0];
+  while (stack.length && seen.size < need) {
+    const z = stack.pop(), x = stack.pop();
+    const step = (nx, nz, open) => { const k = K(nx, nz); if (open && !seen.has(k)) { seen.add(k); stack.push(nx, nz); } };
+    step(x + 1, z, !wallV(seed, x + 1, z)); step(x - 1, z, !wallV(seed, x, z));
+    step(x, z + 1, !wallH(seed, x, z + 1)); step(x, z - 1, !wallH(seed, x, z));
+  }
+  return seen.size >= need;
 }
 
 // A spawn cell that is part of the big connected maze, not one of the sealed-off pockets: flood-fill

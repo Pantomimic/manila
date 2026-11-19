@@ -1,7 +1,7 @@
 // The renderer: chunk streaming, the scene pass and post-processing. No DOM access, so the same code
 // runs in the browser (main.js) and headless in Node for screenshots (tools/shot.mjs).
 // No allocations in render() apart from what WebGPU itself needs per frame.
-import { CELL, CHUNK, MAX_VERTS, edgeSpan, SALT_H, SALT_V } from './gen.js';
+import { CELL, CHUNK, MAX_VERTS, edgeSpan, SALT_H, SALT_V, roomCell } from './gen.js';
 import { FH, buildLevelChunk, levelSeed, levelOf, cellLight } from './levels.js';
 import { SCENE } from './shaders.js';
 import { POST } from './post.js';
@@ -35,7 +35,7 @@ export function createRenderer(device, outFormat, seed) {
   // around the camera, addressed by world cell mod DATA, for the levels below, at and above the
   // camera (texture rows [0, DATA), [DATA, 2 DATA), [2 DATA, 3 DATA)). Columns [0, DATA) hold the
   // horizontal edge of each cell, [DATA, 2 DATA) the vertical edge (both as edgeSpan floats),
-  // [2 DATA, 3 DATA) the light kind.
+  // [2 DATA, 3 DATA) the light kind (x) and special room theme + 1 (y).
   const DATA = 64;
   const dataArr = new Float32Array(DATA * 3 * DATA * 3 * 4);
   const dataTex = device.createTexture({ size: [DATA * 3, DATA * 3], format: 'rgba32float', usage: TU.TEXTURE_BINDING | TU.COPY_DST });
@@ -48,6 +48,7 @@ export function createRenderer(device, outFormat, seed) {
         edgeSpan(sL, SALT_H, z, x, dataArr, (row + col) * 4);
         edgeSpan(sL, SALT_V, x, z, dataArr, (row + DATA + col) * 4);
         dataArr[(row + 2 * DATA + col) * 4] = cellLight(seed, lv, x, z);
+        dataArr[(row + 2 * DATA + col) * 4 + 1] = roomCell(sL, x, z) + 1;      // special room theme + 1 (0: none)
       }
     }
     Q.writeTexture({ texture: dataTex }, dataArr, { bytesPerRow: DATA * 3 * 16 }, [DATA * 3, DATA * 3]);

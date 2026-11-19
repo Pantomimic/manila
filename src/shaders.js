@@ -50,6 +50,10 @@ fn hc(salt: u32, c: vec2i) -> u32 { return hashU(seed(), salt, bitcast<u32>(c.x)
 fn unit(h: u32) -> f32 { return f32(h >> 8u) / 16777216.0; }
 // 0 dead, 1 on, 2 flickering, 3 broken cover, 4 hanging (gen.js lightKind, via the world texture)
 fn lightKind(c: vec2i) -> i32 { if (!gOk) { return 0; } return i32(textureLoad(world, cellTexel(c.x, c.y) + vec2i(128, 0), 0).x + 0.5); }
+// light kind (x) and room theme + 1 (y) in one read
+fn cellData(c: vec2i) -> vec2i { if (!gOk) { return vec2i(0); } let t = textureLoad(world, cellTexel(c.x, c.y) + vec2i(128, 0), 0); return vec2i(i32(t.x + 0.5), i32(t.y + 0.5) - 1); }
+// special room theme of a cell (gen.js roomCell), -1 for none
+fn cellRoom(c: vec2i) -> i32 { if (!gOk) { return -1; } return i32(textureLoad(world, cellTexel(c.x, c.y) + vec2i(128, 0), 0).y + 0.5) - 1; }
 fn lightLevel(c: vec2i, kind: i32) -> f32 {
   if (kind == 0) { return 0.0; }
   let base = 0.82 + 0.18 * unit(hc(306u, c));
@@ -104,6 +108,59 @@ fn tileMissing(lv: i32, t: vec2i) -> bool {
   if (md5(t.x) == 2 && (md5(t.y) == 1 || md5(t.y) == 2)) { return false; }
   var tbl = array<u32, 9>(${MISS_U.map((v) => v + 'u').join(', ')});
   return hashU(gSeed, 700u, bitcast<u32>(t.x), bitcast<u32>(t.y)) < tbl[mutation(lv, floorDiv(t.x, 5), floorDiv(t.y + 1, 5))];
+}
+
+// ---- doodles: now and then a wall carries a drawing in marker (more of them further out) ----
+fn seg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0)); }
+// distance in metres from q (relative to the drawing's centre) to the strokes of drawing h
+fn doodleDist(h: u32, q: vec2f) -> f32 {
+  let t = (h >> 4u) % 7u;
+  var d = 1e3;
+  if (t == 0u) {                                       // tally marks, in fives
+    let n = 3u + (h >> 8u) % 14u;
+    for (var k = 0u; k < n; k++) {
+      let g = f32(k / 5u) * 0.22; let j = f32(k % 5u);
+      if (k % 5u == 4u) { d = min(d, seg(q, vec2f(g - 0.24, -0.06), vec2f(g - 0.02, 0.1))); }
+      else { d = min(d, seg(q, vec2f(g - 0.2 + j * 0.04, -0.08), vec2f(g - 0.2 + j * 0.04 + 0.005, 0.1))); }
+    }
+  } else if (t == 1u) {                                // smiley face
+    d = abs(length(q) - 0.16);
+    d = min(d, length(q - vec2f(-0.055, 0.05)) - 0.01); d = min(d, length(q - vec2f(0.055, 0.05)) - 0.01);
+    let m = abs(length(q - vec2f(0.0, 0.03)) - 0.1);
+    d = min(d, select(1e3, m, q.y < -0.01));
+  } else if (t == 2u) {                                // arrow, pointing along the wall
+    let s = select(1.0, -1.0, (h & 256u) != 0u); let p = vec2f(q.x * s, q.y);
+    d = min(seg(p, vec2f(-0.25, 0.0), vec2f(0.25, 0.0)), min(seg(p, vec2f(0.25, 0.0), vec2f(0.14, 0.08)), seg(p, vec2f(0.25, 0.0), vec2f(0.14, -0.08))));
+  } else if (t == 3u || t == 6u) {                     // stick figure (t 6: arms far too long)
+    let a = select(0.13, 0.42, t == 6u);
+    d = abs(length(q - vec2f(0.0, 0.26)) - 0.06);
+    d = min(d, seg(q, vec2f(0.0, 0.2), vec2f(0.0, -0.05)));
+    d = min(d, min(seg(q, vec2f(0.0, 0.14), vec2f(-a, 0.14 - a * 0.6)), seg(q, vec2f(0.0, 0.14), vec2f(a, 0.14 - a * 0.6))));
+    d = min(d, min(seg(q, vec2f(0.0, -0.05), vec2f(-0.08, -0.28)), seg(q, vec2f(0.0, -0.05), vec2f(0.08, -0.28))));
+  } else if (t == 4u) {                                // scribble
+    let w = 0.06 * sin(q.x * 38.0 + f32(h & 63u)) + 0.04 * sin(q.x * 91.0);
+    d = select(1e3, abs(q.y - w) * 0.45, abs(q.x) < 0.3);
+  } else {                                             // a door, drawn on the wall
+    let b = abs(q - vec2f(0.0, -0.05)) - vec2f(0.22, 0.42);
+    d = abs(max(b.x, b.y));
+    d = min(d, length(q - vec2f(0.13, -0.08)) - 0.015);
+  }
+  return d;
+}
+// ink coverage at a wall point: line is the grid line, cell the edge along it, u metres along the edge
+fn doodle(salt: u32, line: i32, cell: i32, side: f32, u: f32, y: f32, d: f32, mu: f32) -> vec4f {
+  let h = hashU(seed(), salt + select(0u, 7u, side > 0.0), bitcast<u32>(line), bitcast<u32>(cell));
+  if (f32(h >> 16u) / 65536.0 >= 0.035 + 0.14 * mu) { return vec4f(0.0); }
+  if (edgeSpan(salt, line, cell).x >= 0.0) { return vec4f(0.0); }   // only on solid walls
+  let h2 = hashU(h, 41u, 7u, 3u);
+  let sc = 0.8 + 0.7 * f32(h2 & 255u) / 255.0;
+  let c = vec2f(0.7 + 1.6 * f32((h2 >> 8u) & 255u) / 255.0, 0.95 + 0.6 * f32((h2 >> 16u) & 255u) / 255.0);
+  let q = (vec2f(u, y) - c) / sc;
+  if (abs(q.x) > 0.6 || abs(q.y) > 0.6) { return vec4f(0.0); }
+  let dist = doodleDist(h, q) * sc;
+  let cov = (1.0 - smoothstep(0.004, 0.009 + d, dist)) * clamp(1.0 - d * 25.0, 0.0, 1.0) * 0.85;
+  let red = f32(h2 >> 24u) / 255.0 < mu * 0.5;        // far out, some are in something red-brown
+  return vec4f(select(vec3f(0.06, 0.055, 0.05), vec3f(0.32, 0.05, 0.03), red), cov);
 }
 
 // ---- noise ----
@@ -200,11 +257,30 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
   else if (i.m < 8.5) { albedo = vec3f(0.85, 0.85, 0.82); }   // sign white
   else if (i.m < 9.5) { albedo = vec3f(0.62, 0.55, 0.44); }   // desk laminate
   else if (i.m < 10.5) { albedo = vec3f(0.12, 0.13, 0.16); }  // chair fabric
-  else { albedo = vec3f(0.40, 0.38, 0.33) * (0.9 + 0.2 * vnoise(i.wp.xz * 4.0 + i.wp.y * 3.0)); }   // concrete
+  else if (i.m < 11.5) { albedo = vec3f(0.40, 0.38, 0.33) * (0.9 + 0.2 * vnoise(i.wp.xz * 4.0 + i.wp.y * 3.0)); }   // concrete
+  else { albedo = vec3f(0.30, 0.33, 0.38) * (0.92 + 0.16 * vnoise(i.wp.xz * 9.0 + i.wp.y * 9.0)); }   // partition fabric
 
+  let f = vec2i(floor(i.wp.xz / CELL));
+  let room = cellRoom(f);
+  if (wall && i.m > 1.5 && i.m < 2.5) {
+    let side = select(n.x, n.z, alongX);
+    let ln = i32(round(select(i.wp.x, i.wp.z, alongX) / CELL));
+    let cl = select(f.y, f.x, alongX);
+    let dd = doodle(select(202u, 101u, alongX), ln, cl, side, along - f32(cl) * CELL, i.wp.y, dAlong, mu);
+    albedo = mix(albedo, dd.rgb, dd.a);
+  }
+  if (room == 7) {                                     // wet room: soaked carpet, damp wicking up the walls
+    if (i.m < 0.5) { albedo *= vec3f(0.55, 0.55, 0.5); }
+    else if (i.m > 1.5 && i.m < 2.5) { albedo *= mix(vec3f(0.62, 0.6, 0.48), vec3f(1.0), smoothstep(0.25, 0.6 + 0.2 * vnoise(i.wp.xz * 3.0 + i.wp.y), i.wp.y)); }
+  }
   let sick = mu * smoothstep(0.35, 0.75, vnoise(i.wp.xz * 0.06 + vec2f(3.0, f32(L) * 11.0)));
   albedo = mix(albedo, albedo * vec3f(0.92, 0.95, 0.66), sick);
-  let f = vec2i(floor(i.wp.xz / CELL));
+  // wet room floor: soaked carpet with standing puddles (pud 0..1)
+  var pud = 0.0;                                       // (an if, not select: select would run fbm everywhere)
+  if (room == 7 && i.m < 0.5) { pud = smoothstep(0.47, 0.53, fbm(i.wp.xz * 0.45 + 7.0)); }
+  albedo *= 1.0 - 0.65 * pud;
+  let wet = pud > 0.0;
+  let vd = normalize(u.cam.xyz - vin.wp);
   var light = vec3f(0.018, 0.016, 0.011);
   let up = 0.16 * clamp(-n.y, 0.0, 1.0);    // downward faces (ceiling, lintels, arch soffits) catch light bounced off the floor
   // Light occlusion is worked out from a point in front of a wall face, so a bowed wall that bulges
@@ -214,7 +290,8 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
   for (var dz = -1; dz <= 1; dz++) {
     for (var dx = -1; dx <= 1; dx++) {
       let c = fo + vec2i(dx, dz);
-      let kind = lightKind(c);
+      let cd = cellData(c);
+      let kind = cd.x;
       let level = lightLevel(c, kind);
       if (level <= 0.0) { continue; }
       let lp = lightPos(c, kind);
@@ -235,10 +312,30 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
       let win = max(1.0 - hz, 0.0);
       var tint = select(vec3f(1.0, 0.97, 0.86), vec3f(0.93, 1.0, 0.95), kind == 3);   // bare tubes run cold and green
       tint = mix(tint, vec3f(0.86, 1.0, 0.78), 0.3 * mu * f32(hc(313u, c) & 1u));      // far out, some tubes have gone green
+      if (cd.y == 6) { tint = vec3f(1.0, 0.12, 0.06); }                        // red room
       light += tint * (3.6 * level * vis * ndl * win * win / (d2 + 0.8));
     }
   }
   var col = albedo * light;
+  if (wet) {                                           // standing water: a rippled mirror of the ceiling panels
+    var r = vec3f(-vd.x, vd.y, -vd.z);
+    let rip = sin(i.wp.xz * vec2f(9.0, 11.0) + u.cam.w * vec2f(0.7, -0.5) + i.wp.zx * 5.0) * 0.012;
+    r = vec3f(r.x + rip.x, r.y, r.z + rip.y);
+    if (r.y > 0.02) {
+      let P = i.wp + r * ((HEIGHT - i.wp.y) / r.y);
+      let pc = vec2i(floor(P.xz / CELL));
+      let l = (fract(P.xz / CELL) - 0.5) * CELL;
+      let e = vec2f(0.3, 0.6) - abs(l);
+      let k = lightKind(pc);
+      let fres = (0.12 + 0.55 * pow(1.0 - vd.y, 4.0)) * pud;
+      let tg = fract((P.xz - vec2f(0.0, 0.3)) / 0.6); let tb = min(min(tg.x, 1.0 - tg.x), min(tg.y, 1.0 - tg.y));
+      let ceil = mix(vec3f(0.5, 0.48, 0.42), vec3f(0.6, 0.56, 0.45), smoothstep(0.01, 0.04, tb));
+      col = mix(col, ceil * light * 1.1, fres);       // the tiled ceiling, upside down (grid only, no stains: cheap)
+      if (min(e.x, e.y) > 0.0 && k != 0 && k != 4) {  // (steady brightness: flicker isn't worth the cost here)
+        col += vec3f(1.0, 0.98, 0.88) * 1.5 * fres * smoothstep(-0.02, 0.12, min(e.x, e.y));
+      }
+    }
+  }
 
   // fluorescent panel in the middle of this cell's ceiling (2 ft x 4 ft troffer)
   if (i.m > 0.5 && i.m < 1.5) {
@@ -257,7 +354,7 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
       }
       else if (level > 0.05) {
         let grid = 0.94 + 0.06 * step(0.5, fract(l.x * 40.0)) * clamp(1.0 - dFloor * 60.0, 0.0, 1.0);
-        col = vec3f(1.0, 0.98, 0.88) * 7.0 * level * grid * smoothstep(0.03, 0.09, min(e.x, e.y) + 0.03);
+        col = select(vec3f(1.0, 0.98, 0.88), vec3f(1.0, 0.04, 0.015), room == 6) * select(7.0, 4.0, room == 6) * level * grid * smoothstep(0.03, 0.09, min(e.x, e.y) + 0.03);
       } else { col = vec3f(0.16, 0.16, 0.15) * (light + 0.05); }                          // dead (or flickered off)
     }
   }
