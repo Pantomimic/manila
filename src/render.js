@@ -1,7 +1,7 @@
 // The renderer: chunk streaming, the scene pass and post-processing. No DOM access, so the same code
 // runs in the browser (main.js) and headless in Node for screenshots (tools/shot.mjs).
 // No allocations in render() apart from what WebGPU itself needs per frame.
-import { CELL, CHUNK, MAX_VERTS, buildChunk } from './gen.js';
+import { CELL, CHUNK, MAX_VERTS, buildChunk, edgeSpan, lightKind, SALT_H, SALT_V } from './gen.js';
 import { SCENE } from './shaders.js';
 import { POST } from './post.js';
 
@@ -29,8 +29,25 @@ export function createRenderer(device, outFormat, seed) {
     slotCX[slot] = cx; slotCZ[slot] = cz; slotN[slot] = n; slotUsed[slot] = 1;
   };
   const isLoaded = (cx, cz) => { for (let i = 0; i < SLOTS; i++) if (slotUsed[i] && slotCX[i] === cx && slotCZ[i] === cz) return true; return false; };
+  // ---- world data the shader reads instead of re-deriving it per pixel: a DATA x DATA cell window
+  // around the camera, addressed by world cell mod DATA. Texels [0, DATA) hold the horizontal edge of
+  // each cell, [DATA, 2 DATA) the vertical edge (both as edgeSpan floats), [2 DATA, 3 DATA) the light kind.
+  const DATA = 64;
+  const dataArr = new Float32Array(DATA * 3 * DATA * 4);
+  const dataTex = device.createTexture({ size: [DATA * 3, DATA], format: 'rgba32float', usage: TU.TEXTURE_BINDING | TU.COPY_DST });
+  const fillData = (pcx, pcz) => {
+    const bx = pcx * CHUNK - 28, bz = pcz * CHUNK - 28;      // covers the loaded chunks plus one cell
+    for (let z = bz; z < bz + DATA; z++) for (let x = bx; x < bx + DATA; x++) {
+      const row = (z & (DATA - 1)) * DATA * 3, col = x & (DATA - 1);
+      edgeSpan(seed, SALT_H, z, x, dataArr, (row + col) * 4);
+      edgeSpan(seed, SALT_V, x, z, dataArr, (row + DATA + col) * 4);
+      dataArr[(row + 2 * DATA + col) * 4] = lightKind(seed, x, z);
+    }
+    Q.writeTexture({ texture: dataTex }, dataArr, { bytesPerRow: DATA * 3 * 16 }, [DATA * 3, DATA]);
+  };
   const recenter = (pcx, pcz) => {
     curCX = pcx; curCZ = pcz; nWant = 0; wantHead = 0;
+    fillData(pcx, pcz);
     for (let i = 0; i < SLOTS; i++) if (slotUsed[i] && (Math.abs(slotCX[i] - pcx) > RANGE || Math.abs(slotCZ[i] - pcz) > RANGE)) slotUsed[i] = 0;
     for (let ring = 0; ring <= RANGE; ring++) for (let dz = -ring; dz <= ring; dz++) for (let dx = -ring; dx <= ring; dx++) {
       if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring || isLoaded(pcx + dx, pcz + dz)) continue;
@@ -66,7 +83,7 @@ export function createRenderer(device, outFormat, seed) {
     depthStencil: { format: DEPTH, depthWriteEnabled: true, depthCompare: 'less' },
     multisample: { count: MSAA },
   });
-  const sceneBG = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }] });
+  const sceneBG = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: dataTex.createView() }] });
 
   // ---- post pipelines ----
   const postMod = device.createShaderModule({ code: POST });

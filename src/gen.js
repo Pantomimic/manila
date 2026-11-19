@@ -22,55 +22,118 @@ export const hash = (a, b, c, d) => hashU(a, b, c, d) / 4294967296;   // -> [0, 
 // One grid line: walls come in runs. Each line has its own run length (2..6 cells) and phase, a run
 // is solid with probability DENSITY, and single edges are knocked out as doorways. ~95% of cells end
 // up reachable; the sealed-off pockets are kept on purpose.
-// lineKind: 0 open (no wall), 1 wall, 2 doorway (a gap in a solid run, framed: see doorShape).
-export const DENSITY_U = Math.floor(0.35 * 2 ** 32), DOOR_U = Math.floor(0.35 * 2 ** 32);
+// lineKind: 0 open (no wall), 1 wall, 2 doorway (see doorShape), 3 wall with a window hole.
+// Processions override all of this in places (see below).
+const U = (p) => Math.floor(p * 2 ** 32);
+export const DENSITY_U = U(0.35), DOOR_U = U(0.35), WINDOW_U = U(0.06);
 export const SALT_H = 101, SALT_V = 202;
+const unit = (h) => (h >>> 8) / 16777216;
+export const wallLike = (k) => k === 1 || k === 3;
+
+// Processions: in some PB x PB blocks, a straight one-cell corridor crossed by pN doorways in a row.
+// Each door is lower (sinking into the floor), smaller, or further slid into the side wall than the last.
+const PB = 10, PROC_U = U(0.3);
+let pSeed = -1, pBX = 1e9, pBZ = 1e9, pOn = false, pSalt = 0, pL0 = 0, pA0 = 0, pN = 0, pMode = 0;
+function procAt(seed, bx, bz) {                 // one-entry cache: neighbouring edges share a block
+  if (bx === pBX && bz === pBZ && seed === pSeed) return pOn;
+  pSeed = seed; pBX = bx; pBZ = bz;
+  pOn = hashU(seed, 600, bx, bz) < PROC_U;
+  if (!pOn) return false;
+  const hor = (hashU(seed, 601, bx, bz) & 1) === 1;
+  pN = 4 + hashU(seed, 602, bx, bz) % 4;
+  pMode = hashU(seed, 603, bx, bz) % 3;
+  const a = 1 + hashU(seed, 604, bx, bz) % (PB - pN), b = 1 + hashU(seed, 605, bx, bz) % (PB - 2);
+  pSalt = hor ? SALT_H : SALT_V;                // doors sit on lines pL0.. at position pA0 along them
+  pL0 = (hor ? bz : bx) * PB + a; pA0 = (hor ? bx : bz) * PB + b;
+  return true;
+}
+// -1: not part of a procession, 1: corridor side wall, 100 + j: the j-th procession door
+export function procEdge(seed, salt, line, along) {
+  const x = salt === SALT_H ? along : line, z = salt === SALT_H ? line : along;
+  if (!procAt(seed, Math.floor(x / PB), Math.floor(z / PB))) return -1;
+  if (salt === pSalt) return along === pA0 && line >= pL0 && line < pL0 + pN ? 100 + line - pL0 : -1;
+  return (line === pA0 || line === pA0 + 1) && along >= pL0 && along < pL0 + pN - 1 ? 1 : -1;
+}
+
 export function lineKind(seed, salt, line, along) {
+  const pe = procEdge(seed, salt, line, along);
+  if (pe >= 0) return pe >= 100 ? 2 : 1;
   const len = 2 + hashU(seed, salt, line, 1) % 5;
   const off = hashU(seed, salt, line, 2) % len;
   const run = Math.floor((along + off) / len);
   if (hashU(seed, salt + 7, line, run) >= DENSITY_U) return 0;
-  return hashU(seed, salt + 13, line, along) >= DOOR_U ? 1 : 2;
+  if (hashU(seed, salt + 13, line, along) < DOOR_U) return 2;
+  return hashU(seed, salt + 14, line, along) < WINDOW_U ? 3 : 1;
 }
 export const kindH = (seed, x, z) => lineKind(seed, SALT_H, z, x);
 export const kindV = (seed, x, z) => lineKind(seed, SALT_V, x, z);
-export const wallH = (seed, x, z) => kindH(seed, x, z) === 1;
-export const wallV = (seed, x, z) => kindV(seed, x, z) === 1;
-const unit = (h) => (h >>> 8) / 16777216;
+export const wallH = (seed, x, z) => wallLike(kindH(seed, x, z));
+export const wallV = (seed, x, z) => wallLike(kindV(seed, x, z));
 
-// The frame of a doorway edge, written into out: [type, lo, hi, top, apex]. lo..hi is the opening as a
-// fraction of the edge, top the height of the lintel (the spring line for an arch), apex the arch top.
-//   type 0: full-width opening with a dropped soffit above it
-//   type 1: narrow door with wall on both sides and a flat lintel
-//   type 2: arch
-// The shader has the same rules (doorShape) so light only passes through the opening.
+// The opening in a doorway or window edge, written into out: [type, lo, hi, top, bottom/apex].
+// lo..hi is the opening as a fraction of the edge, top the lintel (an arch's spring line).
+//   type -1: plain full-height gap      type 0: full width under a dropped soffit
+//   type 1: door (lintel at top)        type 2: arch, out[4] = crown height
+//   type 3: window, out[4] = sill height
 export function doorShape(seed, salt, line, along, out) {
+  const pe = procEdge(seed, salt, line, along);
+  if (pe >= 100) {
+    const j = pe - 100;
+    let w = 1.15, top = 2.15, c = 0.5;
+    if (pMode === 0) top = Math.max(0.3, 2.15 - j * 0.32);                  // sinking
+    else if (pMode === 1) { const k = 0.8 ** j; w *= k; top *= k; }         // shrinking
+    else c = 0.5 + j * 0.12;                                                // sliding into the wall
+    out[0] = 1; out[1] = c - w / 2 / CELL; out[2] = Math.min(c + w / 2 / CELL, 1 - THICK / CELL);
+    if (out[2] - out[1] < 0.05) out[1] = out[2] - 0.05;
+    out[3] = out[4] = top;
+    return out;
+  }
   const r = unit(hashU(seed, salt + 21, line, along)), u2 = unit(hashU(seed, salt + 22, line, along)), u3 = unit(hashU(seed, salt + 23, line, along));
-  if (r < 0.4) { out[0] = 0; out[1] = 0; out[2] = 1; out[3] = out[4] = 2.05 + 0.3 * u2; return out; }
   let w, top, apex;
-  if (r < 0.75) { out[0] = 1; w = 1.0 + 0.6 * u2; top = apex = 2.05 + 0.15 * u3; }
-  else { out[0] = 2; w = 1.4 + 1.0 * u2; top = 1.75 + 0.2 * u3; apex = Math.min(HEIGHT - 0.12, top + w * 0.35); }
+  if (lineKind(seed, salt, line, along) === 3) { out[0] = 3; w = 0.6 + 1.0 * u2; apex = 0.85 + 0.25 * u3; top = Math.min(2.3, apex + 0.5 + 0.5 * unit(hashU(seed, salt + 25, line, along))); }
+  else if (r < 0.40) { out[0] = -1; out[1] = 0; out[2] = 1; out[3] = out[4] = 99; return out; }
+  else if (r < 0.58) { out[0] = 0; out[1] = 0; out[2] = 1; out[3] = out[4] = 1.95 + 0.5 * u2; return out; }
+  else if (r < 0.76) { out[0] = 1; w = 0.8 + 0.7 * u2; top = apex = 1.95 + 0.35 * u3; }     // door
+  else if (r < 0.84) { out[0] = 1; w = 1.8 + 0.7 * u2; top = apex = 2.0 + 0.4 * u3; }      // wide opening
+  else if (r < 0.89) { out[0] = 1; w = 0.72 + 0.18 * u2; top = apex = 1.7 + 0.2 * u3; }    // small door
+  else { out[0] = 2; w = 1.0 + 1.4 * u2; top = 1.6 + 0.4 * u3; apex = Math.min(HEIGHT - 0.12, top + w * (0.25 + 0.25 * unit(hashU(seed, salt + 25, line, along)))); }
   const c = 0.5 * CELL + (unit(hashU(seed, salt + 24, line, along)) - 0.5) * (CELL - w - 0.6);
   out[1] = (c - w * 0.5) / CELL; out[2] = (c + w * 0.5) / CELL; out[3] = top; out[4] = apex;
   return out;
 }
+// What the shader needs to know about an edge, as 4 floats: (lo, hi, top, w). lo < 0: solid wall.
+// w > top: arch crown; w < 0: window with its sill at -w; otherwise a flat lintel (99 = none).
+const dsE = new Float64Array(5);
+export function edgeSpan(seed, salt, line, along, out, o) {
+  const k = lineKind(seed, salt, line, along);
+  if (k === 1) { out[o] = -1; out[o + 1] = -1; out[o + 2] = 0; out[o + 3] = 0; return; }
+  if (k === 0) { out[o] = 0; out[o + 1] = 1; out[o + 2] = 99; out[o + 3] = 99; return; }
+  doorShape(seed, salt, line, along, dsE);
+  out[o] = dsE[1]; out[o + 1] = dsE[2]; out[o + 2] = dsE[3]; out[o + 3] = dsE[0] === 3 ? -dsE[4] : dsE[4];
+}
 
-// Bowed walls: some unbroken wall segments bulge sideways in a smooth curve (zero at both ends). Only
-// segments of up to BOW_MAX edges whose inner grid points touch nothing else may bow, so a curve never
-// runs into another wall or door. Returns the bulge in metres (0 = straight) and sets bowS/bowE, the
-// segment's first edge and one past its last.
-const BOW_U = Math.floor(0.3 * 2 ** 32), BOW_MAX = 6;
-export let bowS = 0, bowE = 0;
+// Bent walls: some unbroken wall segments of up to BOW_MAX edges, whose inner grid points touch
+// nothing else, either bulge sideways in a smooth curve (zero at both ends) or, when both ends are
+// free too, lean over as a whole. bow() returns the bulge/lean in metres (0 = straight), sets
+// bowLean, and bowS/bowE (the segment's first edge and one past its last).
+const BOW_U = U(0.3), BOW_MAX = 6;
+export let bowS = 0, bowE = 0, bowLean = false;
 export function bow(seed, salt, line, along) {
   let s = along, e = along + 1;
   while (s > along - BOW_MAX && lineKind(seed, salt, line, s - 1) === 1) s--;
   while (e < along + BOW_MAX && lineKind(seed, salt, line, e) === 1) e++;
-  bowS = s; bowE = e;
+  bowS = s; bowE = e; bowLean = false;
   if (e - s >= BOW_MAX || hashU(seed, salt + 31, line, s) >= BOW_U) return 0;
   const other = salt === SALT_H ? SALT_V : SALT_H;
   for (let v = s + 1; v < e; v++) if (lineKind(seed, other, v, line - 1) !== 0 || lineKind(seed, other, v, line) !== 0) return 0;
-  const A = 0.25 + 0.35 * unit(hashU(seed, salt + 32, line, s));
-  return (hashU(seed, salt + 33, line, s) & 1) ? A : -A;
+  const sign = (hashU(seed, salt + 33, line, s) & 1) ? 1 : -1;
+  if ((hashU(seed, salt + 34, line, s) & 3) === 0 && lineKind(seed, salt, line, s - 1) === 0 && lineKind(seed, salt, line, e) === 0
+      && lineKind(seed, other, s, line - 1) === 0 && lineKind(seed, other, s, line) === 0
+      && lineKind(seed, other, e, line - 1) === 0 && lineKind(seed, other, e, line) === 0) {
+    bowLean = true;
+    return sign * (0.5 + 0.5 * unit(hashU(seed, salt + 32, line, s)));
+  }
+  return sign * (0.25 + 0.35 * unit(hashU(seed, salt + 32, line, s)));
 }
 // sideways offset of a bowed wall at position p metres along its line
 const bowOff = (A, p) => A * Math.sin(Math.PI * (p - bowS * CELL) / ((bowE - bowS) * CELL));
@@ -80,7 +143,6 @@ const bowSlope = (A, p) => A * Math.PI / ((bowE - bowS) * CELL) * Math.cos(Math.
 // function of (seed, cell), with the exact same rules in the shader:
 //   0 dead, 1 on, 2 flickering, 3 broken cover (bare tubes), 4 hanging (one end dropped out of the grid)
 // Dark zones are ZONE x ZONE cell blocks where nearly every panel is dead. Odd states stay sparse.
-const U = (p) => Math.floor(p * 2 ** 32);
 export const ZONE = 5;
 export const LIGHT_U = { darkZone: U(0.09), darkFlicker: U(0.07), dead: U(0.13), flicker: U(0.03), broken: U(0.06), hang: U(0.075) };
 export function lightKind(seed, x, z) {
@@ -136,14 +198,17 @@ export function buildChunk(seed, cx, cz, out) {
     P(a0, o0, y0, na, no, ny, m); P(a1, o1, y1, na, no, ny, m); P(a2, o2, y2, na, no, ny, m);
     P(a0, o0, y0, na, no, ny, m); P(a2, o2, y2, na, no, ny, m); P(a3, o3, y3, na, no, ny, m);
   };
-  // axis-aligned box on the line: two long sides, end caps, and a bottom face when it doesn't reach the floor
-  const B = (a0, a1, y0, y1) => {
-    const T = THICK;
-    Q(a0, -T, y0, a1, -T, y0, a1, -T, y1, a0, -T, y1, 0, -1, 0, 2);
-    Q(a0, T, y0, a1, T, y0, a1, T, y1, a0, T, y1, 0, 1, 0, 2);
-    Q(a0, -T, y0, a0, T, y0, a0, T, y1, a0, -T, y1, -1, 0, 0, 2);
-    Q(a1, -T, y0, a1, T, y0, a1, T, y1, a1, -T, y1, 1, 0, 0, 2);
+  // axis-aligned box on the line: two long sides, end caps, and bottom/top faces when it doesn't
+  // reach the floor/ceiling. lean tilts it: the top is shifted sideways by lean metres.
+  const B = (a0, a1, y0, y1, lean = 0) => {
+    if (a1 - a0 < 1e-3) return;
+    const T = THICK, l0 = lean * y0 / H, l1 = lean * y1 / H, k = 1 / Math.hypot(1, lean / H), ny = lean / H * k;
+    Q(a0, l0 - T, y0, a1, l0 - T, y0, a1, l1 - T, y1, a0, l1 - T, y1, 0, -k, ny, 2);
+    Q(a0, l0 + T, y0, a1, l0 + T, y0, a1, l1 + T, y1, a0, l1 + T, y1, 0, k, -ny, 2);
+    Q(a0, l0 - T, y0, a0, l0 + T, y0, a0, l1 + T, y1, a0, l1 - T, y1, -1, 0, 0, 2);
+    Q(a1, l0 - T, y0, a1, l0 + T, y0, a1, l1 + T, y1, a1, l1 - T, y1, 1, 0, 0, 2);
     if (y0 > 0) Q(a0, -T, y0, a1, -T, y0, a1, T, y0, a0, T, y0, 0, 0, -1, 2);
+    if (y1 < H - 1e-3) Q(a0, -T, y1, a1, -T, y1, a1, T, y1, a0, T, y1, 0, 0, 1, 2);
   };
   const SUB = 6, ds = new Float64Array(5);
   for (const [salt, ext] of [[SALT_H, x0], [SALT_V, z0]]) {
@@ -153,13 +218,16 @@ export function buildChunk(seed, cx, cz, out) {
       LW = line * CELL;
       for (let i = a0; i < a1;) {
         const k = lineKind(seed, salt, line, i);
-        if (k === 2) {                       // doorway frame
+        if (k === 2 || k === 3) {            // doorway or window frame
           doorShape(seed, salt, line, i, ds);
-          const u0 = i * CELL + (lineKind(seed, salt, line, i - 1) === 1 ? THICK : 0);
-          const u1 = (i + 1) * CELL - (lineKind(seed, salt, line, i + 1) === 1 ? THICK : 0);
+          const pk = lineKind(seed, salt, line, i - 1), nk = lineKind(seed, salt, line, i + 1);
+          // walls stop THICK short of / run THICK past a frame edge so pieces meet without overlap
+          const u0 = i * CELL + (k === 2 ? (wallLike(pk) ? THICK : 0) : (wallLike(pk) ? 0 : -THICK));
+          const u1 = (i + 1) * CELL - (k === 2 ? (wallLike(nk) ? THICK : 0) : (wallLike(nk) ? 0 : -THICK));
+          const o0 = Math.max(u0, (i + ds[1]) * CELL), o1 = Math.min(u1, (i + ds[2]) * CELL);
           if (ds[0] === 0) B(u0, u1, ds[3], H);
-          else {
-            const o0 = (i + ds[1]) * CELL, o1 = (i + ds[2]) * CELL;
+          else if (ds[0] === 3) { B(u0, o0, 0, H); B(o1, u1, 0, H); B(o0, o1, 0, ds[4]); B(o0, o1, ds[3], H); }
+          else if (ds[0] >= 1) {
             B(u0, o0, 0, H); B(o1, u1, 0, H);
             if (ds[0] === 1) B(o0, o1, ds[3], H);
             else {                           // arch: slices from the spring line up to the elliptical crown
@@ -179,15 +247,16 @@ export function buildChunk(seed, cx, cz, out) {
         if (k === 0) { i++; continue; }
         const A = bow(seed, salt, line, i);
         let e = i; while (e < a1 && lineKind(seed, salt, line, e) === 1) e++;
-        if (A === 0) {
-          const ea = i === a0 && lineKind(seed, salt, line, i - 1) === 1 ? 0 : THICK, eb = e === a1 && lineKind(seed, salt, line, e) === 1 ? 0 : THICK;
-          B(i * CELL - ea, e * CELL + eb, 0, H);
-        } else {                             // bowed: SUB slices per edge, smooth normals
+        const ea = wallLike(lineKind(seed, salt, line, i - 1)) ? 0 : THICK, eb = wallLike(lineKind(seed, salt, line, e)) ? 0 : THICK;
+        if (A === 0) B(i * CELL - ea, e * CELL + eb, 0, H);
+        else if (bowLean) B(i * CELL - ea, e * CELL + eb, 0, H, A);
+        else {                               // bowed: SUB slices per edge, smooth normals
           const T = THICK;
           for (let j = i; j < e; j++) for (let q = 0; q < SUB; q++) {
             let p0 = (j + q / SUB) * CELL, p1 = (j + (q + 1) / SUB) * CELL;
-            if (j === bowS && q === 0) p0 -= T;
-            if (j === bowE - 1 && q === SUB - 1) p1 += T;
+            const first = j === bowS && q === 0, last = j === bowE - 1 && q === SUB - 1;
+            if (first) p0 -= ea;
+            if (last) p1 += eb;
             const c0 = Math.min(Math.max(p0, bowS * CELL), bowE * CELL), c1 = Math.min(Math.max(p1, bowS * CELL), bowE * CELL);
             const f0 = bowOff(A, c0), f1 = bowOff(A, c1), s0 = bowSlope(A, c0), s1 = bowSlope(A, c1);
             const n0 = 1 / Math.hypot(1, s0), n1 = 1 / Math.hypot(1, s1);
@@ -195,8 +264,8 @@ export function buildChunk(seed, cx, cz, out) {
               P(p0, f0 + sd * T, 0, -sd * s0 * n0, sd * n0, 0, 2); P(p1, f1 + sd * T, 0, -sd * s1 * n1, sd * n1, 0, 2); P(p1, f1 + sd * T, H, -sd * s1 * n1, sd * n1, 0, 2);
               P(p0, f0 + sd * T, 0, -sd * s0 * n0, sd * n0, 0, 2); P(p1, f1 + sd * T, H, -sd * s1 * n1, sd * n1, 0, 2); P(p0, f0 + sd * T, H, -sd * s0 * n0, sd * n0, 0, 2);
             }
-            if (j === bowS && q === 0) Q(p0, -T, 0, p0, T, 0, p0, T, H, p0, -T, H, -1, 0, 0, 2);
-            if (j === bowE - 1 && q === SUB - 1) Q(p1, -T, 0, p1, T, 0, p1, T, H, p1, -T, H, 1, 0, 0, 2);
+            if (first) Q(p0, -T, 0, p0, T, 0, p0, T, H, p0, -T, H, -1, 0, 0, 2);
+            if (last) Q(p1, -T, 0, p1, T, 0, p1, T, H, p1, -T, H, 1, 0, 0, 2);
           }
         }
         i = e;
@@ -246,11 +315,16 @@ function edge(seed, salt, line, i, pos, r) {
   const hor = salt === SALT_H, L = line * CELL, T = THICK;
   if (k === 2) {
     doorShape(seed, salt, line, i, dsC);
-    if (dsC[0] !== 0) { slab(hor, pos, r, L, i * CELL - T, (i + dsC[1]) * CELL); slab(hor, pos, r, L, (i + dsC[2]) * CELL, (i + 1) * CELL + T); }
+    if (dsC[0] >= 1) { slab(hor, pos, r, L, i * CELL - T, (i + dsC[1]) * CELL); slab(hor, pos, r, L, (i + dsC[2]) * CELL, (i + 1) * CELL + T); }
     return;
   }
-  const A = bow(seed, salt, line, i);
+  const A = k === 1 ? bow(seed, salt, line, i) : 0;
   if (A === 0) { slab(hor, pos, r, L, i * CELL - T, (i + 1) * CELL + T); return; }
+  if (bowLean) {                     // the wall at foot level and at head height
+    slab(hor, pos, r, L, i * CELL - T, (i + 1) * CELL + T);
+    slab(hor, pos, r, L + A * 1.75 / HEIGHT, i * CELL - T, (i + 1) * CELL + T);
+    return;
+  }
   for (let q = 0; q < 4; q++) {
     const p0 = (i + q / 4) * CELL, p1 = (i + (q + 1) / 4) * CELL, f0 = bowOff(A, p0), f1 = bowOff(A, p1);
     if (hor) pushSeg(pos, r + T, p0, L + f0, p1, L + f1); else pushSeg(pos, r + T, L + f0, p0, L + f1, p1);

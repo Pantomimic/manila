@@ -1,10 +1,12 @@
 // The look: wallpaper, carpet, drop ceiling and fluorescent panels, all generated in the shader from
 // world position. Output is linear HDR; post.js adds bloom, tone mapping, vignette and grain.
-import { CELL, HEIGHT, DENSITY_U, DOOR_U, ZONE, LIGHT_U } from './gen.js';
+import { CELL, HEIGHT } from './gen.js';
 
 export const SCENE = /* wgsl */ `
 struct U { vp: mat4x4f, cam: vec4f, misc: vec4f };  // cam.xyz eye, cam.w time; misc.x seed
 @group(0) @binding(0) var<uniform> u: U;
+// world data around the camera, written by render.js (fillData): edges and light kinds per cell mod 64
+@group(0) @binding(1) var world: texture_2d<f32>;
 
 const CELL = ${CELL.toFixed(1)};
 const HEIGHT = ${HEIGHT.toFixed(2)};
@@ -28,45 +30,18 @@ fn hashU(a: u32, b: u32, c: u32, d: u32) -> u32 {
 }
 fn seed() -> u32 { return u32(u.misc.x); }
 fn floorDiv(a: i32, b: i32) -> i32 { if (a >= 0) { return a / b; } return -((-a + b - 1) / b); }
-// 0 open, 1 wall, 2 doorway
-fn lineKind(salt: u32, line: i32, along: i32) -> i32 {
-  let L = bitcast<u32>(line);
-  let len = 2u + hashU(seed(), salt, L, 1u) % 5u;
-  let off = hashU(seed(), salt, L, 2u) % len;
-  let run = floorDiv(along + i32(off), i32(len));
-  if (hashU(seed(), salt + 7u, L, bitcast<u32>(run)) >= ${DENSITY_U}u) { return 0; }
-  return select(2, 1, hashU(seed(), salt + 13u, L, bitcast<u32>(along)) >= ${DOOR_U}u);
-}
-fn unitf(h: u32) -> f32 { return f32(h >> 8u) / 16777216.0; }
-// the opening in an edge: (lo, hi) along it as 0..1, lintel/spring height, arch crown. x < 0: solid wall
+fn cellTexel(x: i32, z: i32) -> vec2i { return vec2i(x & 63, z & 63); }
+// an edge's opening (lo, hi) along it as 0..1, then lintel height and crown (w > z) or -sill (w < 0).
+// lo < 0: solid wall. salt 101 = horizontal line (line = z, along = x), 202 = vertical line.
 fn edgeSpan(salt: u32, line: i32, along: i32) -> vec4f {
-  let k = lineKind(salt, line, along);
-  if (k == 1) { return vec4f(-1.0); }
-  if (k == 0) { return vec4f(0.0, 1.0, 99.0, 99.0); }
-  let L = bitcast<u32>(line); let A = bitcast<u32>(along);
-  let r = unitf(hashU(seed(), salt + 21u, L, A)); let u2 = unitf(hashU(seed(), salt + 22u, L, A)); let u3 = unitf(hashU(seed(), salt + 23u, L, A));
-  if (r < 0.4) { let t = 2.05 + 0.3 * u2; return vec4f(0.0, 1.0, t, t); }
-  var w: f32; var top: f32; var apex: f32;
-  if (r < 0.75) { w = 1.0 + 0.6 * u2; top = 2.05 + 0.15 * u3; apex = top; }
-  else { w = 1.4 + 1.0 * u2; top = 1.75 + 0.2 * u3; apex = min(HEIGHT - 0.12, top + w * 0.35); }
-  let c = 0.5 * CELL + (unitf(hashU(seed(), salt + 24u, L, A)) - 0.5) * (CELL - w - 0.6);
-  return vec4f((c - w * 0.5) / CELL, (c + w * 0.5) / CELL, top, apex);
+  if (salt == 101u) { return textureLoad(world, cellTexel(along, line), 0); }
+  return textureLoad(world, cellTexel(line, along) + vec2i(64, 0), 0);
 }
 
 fn hc(salt: u32, c: vec2i) -> u32 { return hashU(seed(), salt, bitcast<u32>(c.x), bitcast<u32>(c.y)); }
 fn unit(h: u32) -> f32 { return f32(h >> 8u) / 16777216.0; }
-// 0 dead, 1 on, 2 flickering, 3 broken cover, 4 hanging
-fn lightKind(c: vec2i) -> i32 {
-  let h = hc(303u, c);
-  let zc = vec2i(floorDiv(c.x, ${ZONE}), floorDiv(c.y, ${ZONE}));
-  if (hc(500u, zc) < ${LIGHT_U.darkZone}u) { return select(0, 2, h < ${LIGHT_U.darkFlicker}u); }
-  if (h < ${LIGHT_U.dead}u) { return 0; }
-  let k = hc(304u, c);
-  if (k < ${LIGHT_U.flicker}u) { return 2; }
-  if (k < ${LIGHT_U.broken}u) { return 3; }
-  if (k < ${LIGHT_U.hang}u) { return 4; }
-  return 1;
-}
+// 0 dead, 1 on, 2 flickering, 3 broken cover, 4 hanging (gen.js lightKind, via the world texture)
+fn lightKind(c: vec2i) -> i32 { return i32(textureLoad(world, cellTexel(c.x, c.y) + vec2i(128, 0), 0).x + 0.5); }
 fn lightLevel(c: vec2i, kind: i32) -> f32 {
   if (kind == 0) { return 0.0; }
   let base = 0.82 + 0.18 * unit(hc(306u, c));
@@ -97,6 +72,7 @@ fn through(s: vec4f, t: f32, y: f32) -> f32 {
   if (s.x < 0.0) { return 0.0; }
   let p = PEN / CELL;
   let across = smoothstep(s.x - p, s.x + p, t) * (1.0 - smoothstep(s.y - p, s.y + p, t));
+  if (s.w < 0.0) { return across * smoothstep(-s.w - 0.12, -s.w + 0.12, y) * (1.0 - smoothstep(s.z - 0.12, s.z + 0.12, y)); }  // window
   var top = s.z;
   if (s.w > s.z + 0.01) { let q = (t - (s.x + s.y) * 0.5) / ((s.y - s.x) * 0.5); top = s.z + (s.w - s.z) * sqrt(max(0.0, 1.0 - q * q)); }
   return across * (1.0 - smoothstep(top - 0.12, top + 0.12, y));
@@ -154,7 +130,8 @@ fn carpet(p: vec2f, d: f32, g: f32) -> vec3f {
 }
 
 // ceiling tile colour; panel emission handled separately
-fn ceiling(p: vec2f, d: f32, g: f32) -> vec3f {
+fn ceiling(pw: vec2f, d: f32, g: f32) -> vec3f {
+  let p = pw - vec2f(0.0, 0.3);              // tile grid offset so each panel fills exactly 1 x 2 tiles
   let tile = vec2i(floor(p / 0.6));
   var c = vec3f(0.70, 0.66, 0.52) * (0.92 + h2(tile) * 0.1);
   c *= 0.95 + vnoise(p * 30.0) * 0.1 * clamp(1.0 - d * 30.0, 0.0, 1.0);   // pitted acoustic tile
