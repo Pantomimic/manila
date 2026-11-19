@@ -63,6 +63,7 @@ async function start() {
   function toggleDrone() {
     if (!drone) { drone = true; dr.y = cam.y; dv.fill(0); }
     else {                                              // drop to the floor from where the drone is
+      if (cramped(levelSeed(seed, levelOf(dr.y)), pos, RADIUS, SHORT)) return;   // (not from inside a window)
       drone = false; py = dr.y - 0.4; camFeet = py; eye = 0.4; vy = 0; grounded = false;
       if (cramped(levelSeed(seed, levelOf(py + 1.0)), pos, RADIUS, TALL)) crouched = true;
     }

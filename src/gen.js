@@ -408,22 +408,29 @@ export function buildChunk(seed, cx, cz, out, opt = {}) {
 // frames and bent walls, for a player h metres tall: a doorway lower than that is a wall (crouch to
 // get through). Returns how far it moved pos. Allocates nothing (it runs every frame).
 const dsC = new Float64Array(5);
-export function collide(seed, pos, r, h = 1.75) {
+// h: top of the body above the floor, lo: its bottom (0 walking; a flying drone can pass windows)
+export function collide(seed, pos, r, h = 1.75, lo = 0) {
   const ox = pos[0], oz = pos[1];
   for (let pass = 0; pass < 2; pass++) {
     const cx = Math.floor(pos[0] / CELL), cz = Math.floor(pos[1] / CELL);
-    for (let line = cz - 1; line <= cz + 2; line++) for (let i = cx - 1; i <= cx + 1; i++) edge(seed, SALT_H, line, i, pos, r, h);
-    for (let line = cx - 1; line <= cx + 2; line++) for (let i = cz - 1; i <= cz + 1; i++) edge(seed, SALT_V, line, i, pos, r, h);
+    for (let line = cz - 1; line <= cz + 2; line++) for (let i = cx - 1; i <= cx + 1; i++) edge(seed, SALT_H, line, i, pos, r, h, lo);
+    for (let line = cx - 1; line <= cx + 2; line++) for (let i = cz - 1; i <= cz + 1; i++) edge(seed, SALT_V, line, i, pos, r, h, lo);
   }
   return Math.hypot(pos[0] - ox, pos[1] - oz);
 }
 // would a player h tall at pos be pushed (used to stop you standing up under a low lintel)
 const probe = new Float64Array(2);
-export function cramped(seed, pos, r, h) { probe[0] = pos[0]; probe[1] = pos[1]; return collide(seed, probe, r, h) > 1e-4; }
-function edge(seed, salt, line, i, pos, r, h) {
+export function cramped(seed, pos, r, h, lo = 0) { probe[0] = pos[0]; probe[1] = pos[1]; return collide(seed, probe, r, h, lo) > 1e-4; }
+function edge(seed, salt, line, i, pos, r, h, lo) {
   const k = lineKind(seed, salt, line, i);
   if (k === 0) return;
   const hor = salt === SALT_H, L = line * CELL, T = THICK;
+  if (k === 3) {                     // window: solid unless the body fits between sill and top
+    doorShape(seed, salt, line, i, dsC);
+    if (lo > dsC[4] + 0.03 && h < dsC[3] - 0.03) { slab(hor, pos, r, L, i * CELL - T, (i + dsC[1]) * CELL); slab(hor, pos, r, L, (i + dsC[2]) * CELL, (i + 1) * CELL + T); }
+    else slab(hor, pos, r, L, i * CELL - T, (i + 1) * CELL + T);
+    return;
+  }
   if (k === 2) {
     doorShape(seed, salt, line, i, dsC);
     if (dsC[0] >= 0 && Math.max(dsC[3], dsC[0] === 2 ? dsC[4] : 0) < h) { slab(hor, pos, r, L, i * CELL - T, (i + 1) * CELL + T); return; }
