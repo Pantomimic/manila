@@ -125,8 +125,8 @@ export function createRenderer(device, outFormat, seed) {
 
   // view-projection matrix, column-major, WebGPU depth range 0..1
   const P = new Float32Array(16), V = new Float32Array(16);
-  function matrices(ex, ey, ez, yaw, pitch) {
-    const f = 1 / Math.tan(FOV / 2), near = 0.05, far = 200;
+  function matrices(ex, ey, ez, yaw, pitch, fov) {
+    const f = 1 / Math.tan(fov / 2), near = 0.05, far = 200;
     P.fill(0); P[0] = f / (W / H); P[5] = f; P[10] = far / (near - far); P[11] = -1; P[14] = near * far / (near - far);
     const cp = Math.cos(pitch), fx = Math.sin(yaw) * cp, fy = Math.sin(pitch), fz = -Math.cos(yaw) * cp;
     const rx = Math.cos(yaw), rz = Math.sin(yaw);                        // right = forward x world-up
@@ -141,9 +141,9 @@ export function createRenderer(device, outFormat, seed) {
   }
 
   const stats = { tris: 0, chunkX: 0, chunkZ: 0 };
-  // cam: { x, y, z, yaw, pitch }; out: the texture view to draw the final image into
+  // cam: { x, y, z, yaw, pitch, fov? (radians) }; out: the texture view to draw the final image into
   function render(out, cam, time) {
-    matrices(cam.x, cam.y, cam.z, cam.yaw, cam.pitch);
+    matrices(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.fov || FOV);
     UB[16] = cam.x; UB[17] = cam.y; UB[18] = cam.z; UB[19] = time; UB[20] = seed;
     Q.writeBuffer(ubo, 0, UB);
     PU[0] = time; PU[1] = EXPOSURE; PU[2] = BLOOM; PU[3] = GRAIN;

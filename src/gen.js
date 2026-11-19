@@ -30,27 +30,40 @@ export const SALT_H = 101, SALT_V = 202;
 const unit = (h) => (h >>> 8) / 16777216;
 export const wallLike = (k) => k === 1 || k === 3;
 
-// Processions: in some PB x PB blocks, a straight one-cell corridor crossed by pN doorways in a row.
-// Each door is lower (sinking into the floor), smaller, or further slid into the side wall than the last.
+// Processions: in some PB x PB blocks, the same doorway repeated pN times, either
+//   in a line (pRow false): a one-cell corridor crossed by door after door, or
+//   side by side (pRow true): a wall of doors, each opening into its own one-cell closet.
+// Each door is lower than the last (sinking into the floor), smaller, slid further into the wall,
+// or (mode 3) exactly the same.
 const PB = 10, PROC_U = U(0.3);
-let pSeed = -1, pBX = 1e9, pBZ = 1e9, pOn = false, pSalt = 0, pL0 = 0, pA0 = 0, pN = 0, pMode = 0;
+let pSeed = -1, pBX = 1e9, pBZ = 1e9, pOn = false, pRow = false, pSalt = 0, pL0 = 0, pA0 = 0, pN = 0, pMode = 0;
 function procAt(seed, bx, bz) {                 // one-entry cache: neighbouring edges share a block
   if (bx === pBX && bz === pBZ && seed === pSeed) return pOn;
   pSeed = seed; pBX = bx; pBZ = bz;
   pOn = hashU(seed, 600, bx, bz) < PROC_U;
   if (!pOn) return false;
   const hor = (hashU(seed, 601, bx, bz) & 1) === 1;
+  pRow = (hashU(seed, 606, bx, bz) % 5) < 2;
   pN = 4 + hashU(seed, 602, bx, bz) % 4;
-  pMode = hashU(seed, 603, bx, bz) % 3;
-  const a = 1 + hashU(seed, 604, bx, bz) % (PB - pN), b = 1 + hashU(seed, 605, bx, bz) % (PB - 2);
-  pSalt = hor ? SALT_H : SALT_V;                // doors sit on lines pL0.. at position pA0 along them
+  pMode = hashU(seed, 603, bx, bz) % 4;
+  // corridor: door lines pL0..pL0+pN-1, all at pA0. row: one door line pL0, doors at pA0..pA0+pN-1,
+  // closets behind it (back wall on pL0+1, dividers on the cross lines pA0..pA0+pN).
+  const a = 1 + hashU(seed, 604, bx, bz) % (pRow ? PB - 2 : PB - pN), b = 1 + hashU(seed, 605, bx, bz) % (pRow ? PB - pN - 1 : PB - 2);
+  pSalt = hor ? SALT_H : SALT_V;
   pL0 = (hor ? bz : bx) * PB + a; pA0 = (hor ? bx : bz) * PB + b;
   return true;
 }
-// -1: not part of a procession, 1: corridor side wall, 100 + j: the j-th procession door
+// -1: not part of a procession, 1: forced wall, 100 + j: the j-th procession door
 export function procEdge(seed, salt, line, along) {
   const x = salt === SALT_H ? along : line, z = salt === SALT_H ? line : along;
   if (!procAt(seed, Math.floor(x / PB), Math.floor(z / PB))) return -1;
+  if (pRow) {
+    if (salt === pSalt) {
+      if (along < pA0 || along >= pA0 + pN) return -1;
+      return line === pL0 ? 100 + along - pA0 : line === pL0 + 1 ? 1 : -1;
+    }
+    return line >= pA0 && line <= pA0 + pN && along === pL0 ? 1 : -1;
+  }
   if (salt === pSalt) return along === pA0 && line >= pL0 && line < pL0 + pN ? 100 + line - pL0 : -1;
   return (line === pA0 || line === pA0 + 1) && along >= pL0 && along < pL0 + pN - 1 ? 1 : -1;
 }
@@ -82,7 +95,7 @@ export function doorShape(seed, salt, line, along, out) {
     let w = 1.15, top = 2.15, c = 0.5;
     if (pMode === 0) top = Math.max(0.3, 2.15 - j * 0.32);                  // sinking
     else if (pMode === 1) { const k = 0.8 ** j; w *= k; top *= k; }         // shrinking
-    else c = 0.5 + j * 0.12;                                                // sliding into the wall
+    else if (pMode === 2) c = 0.5 + j * 0.12;                               // sliding into the wall
     out[0] = 1; out[1] = c - w / 2 / CELL; out[2] = Math.min(c + w / 2 / CELL, 1 - THICK / CELL);
     if (out[2] - out[1] < 0.05) out[1] = out[2] - 0.05;
     out[3] = out[4] = top;
@@ -300,21 +313,28 @@ export function buildChunk(seed, cx, cz, out) {
 }
 
 // Push a circle of radius r at pos (pos[0] = x, pos[1] = z, in metres) out of nearby walls, door
-// frames and bowed walls. Allocates nothing (it runs every frame).
+// frames and bent walls, for a player h metres tall: a doorway lower than that is a wall (crouch to
+// get through). Returns how far it moved pos. Allocates nothing (it runs every frame).
 const dsC = new Float64Array(5);
-export function collide(seed, pos, r) {
+export function collide(seed, pos, r, h = 1.75) {
+  const ox = pos[0], oz = pos[1];
   for (let pass = 0; pass < 2; pass++) {
     const cx = Math.floor(pos[0] / CELL), cz = Math.floor(pos[1] / CELL);
-    for (let line = cz - 1; line <= cz + 2; line++) for (let i = cx - 1; i <= cx + 1; i++) edge(seed, SALT_H, line, i, pos, r);
-    for (let line = cx - 1; line <= cx + 2; line++) for (let i = cz - 1; i <= cz + 1; i++) edge(seed, SALT_V, line, i, pos, r);
+    for (let line = cz - 1; line <= cz + 2; line++) for (let i = cx - 1; i <= cx + 1; i++) edge(seed, SALT_H, line, i, pos, r, h);
+    for (let line = cx - 1; line <= cx + 2; line++) for (let i = cz - 1; i <= cz + 1; i++) edge(seed, SALT_V, line, i, pos, r, h);
   }
+  return Math.hypot(pos[0] - ox, pos[1] - oz);
 }
-function edge(seed, salt, line, i, pos, r) {
+// would a player h tall at pos be pushed (used to stop you standing up under a low lintel)
+const probe = new Float64Array(2);
+export function cramped(seed, pos, r, h) { probe[0] = pos[0]; probe[1] = pos[1]; return collide(seed, probe, r, h) > 1e-4; }
+function edge(seed, salt, line, i, pos, r, h) {
   const k = lineKind(seed, salt, line, i);
   if (k === 0) return;
   const hor = salt === SALT_H, L = line * CELL, T = THICK;
   if (k === 2) {
     doorShape(seed, salt, line, i, dsC);
+    if (dsC[0] >= 0 && Math.max(dsC[3], dsC[0] === 2 ? dsC[4] : 0) < h) { slab(hor, pos, r, L, i * CELL - T, (i + 1) * CELL + T); return; }
     if (dsC[0] >= 1) { slab(hor, pos, r, L, i * CELL - T, (i + dsC[1]) * CELL); slab(hor, pos, r, L, (i + dsC[2]) * CELL, (i + 1) * CELL + T); }
     return;
   }
@@ -322,7 +342,7 @@ function edge(seed, salt, line, i, pos, r) {
   if (A === 0) { slab(hor, pos, r, L, i * CELL - T, (i + 1) * CELL + T); return; }
   if (bowLean) {                     // the wall at foot level and at head height
     slab(hor, pos, r, L, i * CELL - T, (i + 1) * CELL + T);
-    slab(hor, pos, r, L + A * 1.75 / HEIGHT, i * CELL - T, (i + 1) * CELL + T);
+    slab(hor, pos, r, L + A * Math.min(h, 1.75) / HEIGHT, i * CELL - T, (i + 1) * CELL + T);
     return;
   }
   for (let q = 0; q < 4; q++) {
