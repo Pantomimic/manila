@@ -2,8 +2,10 @@
 // Rule carried over from abyssal-garden: no allocations inside frame() (no GC stutter).
 import { collide, cramped, findSpawn } from './gen.js';
 import { createRenderer } from './render.js';
-import { levelOf, levelSeed, groundAt, ceilAt, collideProps } from './levels.js';
+import { levelOf, levelSeed, groundAt, ceilAt, collideProps, FH } from './levels.js';
 import { createAudio } from './audio.js';
+import { createPhotos, AUTO_EVERY } from './photos.js';
+import { flyDrone } from './drone.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('c'), menu = $('menu'), hud = $('hud');
@@ -35,12 +37,48 @@ async function start() {
   const R = createRenderer(device, FMT, seed);
 
   // player: start in the middle of a cell (walls only sit on cell edges) that joins the open maze
-  const pos = new Float64Array(findSpawn(seed));
-  const cam = { x: pos[0], y: EYE, z: pos[1], yaw: (parseFloat(qs.get('yaw')) || 0) * Math.PI / 180, pitch: 0, fov: FOV * Math.PI / 180 };
+  // a photo's where.txt link (?x=&z=&y=&yaw=&pitch=, &drone) opens the game at that exact view
+  const num = (k, d) => { const v = parseFloat(qs.get(k)); return Number.isFinite(v) ? v : d; };
+  const pos = new Float64Array(qs.has('x') && qs.has('z') ? [num('x', 0), num('z', 0)] : findSpawn(seed));
+  const cam = { x: pos[0], y: EYE, z: pos[1], yaw: num('yaw', 0) * Math.PI / 180, pitch: num('pitch', 0) * Math.PI / 180, fov: FOV * Math.PI / 180 };
   let bob = 0, stats = false, audio = null, crouched = false, eye = EYE, fov = FOV, zoom = false;
   let py = 0, vy = 0, grounded = true, camFeet = 0;    // feet height; levels are FH apart
-  const keys = new Set();
-  addEventListener('keydown', (e) => { keys.add(e.code); if (e.code === 'KeyH') stats = !stats; if (e.code === 'KeyM' && audio) audio.toggleMute(); });
+  if (qs.has('y')) { py = num('y', EYE) - EYE; camFeet = py; grounded = false; }
+  // drone: F to fly. You become a small camera drone (Space up, C down); F again drops you where it is
+  let drone = qs.has('drone');
+  const dr = { y: num('y', EYE), v: new Float64Array(3) }, dv = dr.v;
+  let autoCam = false, autoT = 0, shoot = false, flashT = 0;
+  const flash = $('flash'), phInfo = $('phn');
+  const photos = createPhotos(canvas, () => showPhotos());
+  function showPhotos() {
+    const u = photos.unsaved;
+    phInfo.textContent = photos.folder ? photos.count + ' photos, saving to the folder "' + photos.folder + '"'
+      : u ? u + ' photo' + (u > 1 ? 's' : '') + ' not saved yet' : photos.count ? 'All photos saved' : 'No photos yet: P takes one, O takes one every ' + AUTO_EVERY + ' s';
+    $('phsave').disabled = !u || !!photos.folder;
+  }
+  showPhotos();
+  $('phsave').onclick = () => photos.saveZip(seed).catch((e) => showError(e.message));
+  $('phdir').onclick = () => photos.pickFolder().catch((e) => { if (e.name !== 'AbortError') showError(e.message); });
+  if (!window.showDirectoryPicker) $('phdir').style.display = 'none';
+  function toggleDrone() {
+    if (!drone) { drone = true; dr.y = cam.y; dv.fill(0); }
+    else {                                              // drop to the floor from where the drone is
+      drone = false; py = dr.y - 0.4; camFeet = py; eye = 0.4; vy = 0; grounded = false;
+      if (cramped(levelSeed(seed, levelOf(py + 1.0)), pos, RADIUS, TALL)) crouched = true;
+    }
+    if (audio) audio.drone(drone ? 0 : -1);
+  }
+  const keys = new Set(), key = (c) => keys.has(c) ? 1 : 0;
+  addEventListener('keydown', (e) => {
+    keys.add(e.code);
+    if (e.code === 'KeyH') stats = !stats;
+    if (e.code === 'KeyM' && audio) audio.toggleMute();
+    if (document.pointerLockElement !== canvas || e.repeat) return;
+    if (e.code === 'KeyF') toggleDrone();
+    if (e.code === 'KeyP') shoot = true;
+    if (e.code === 'KeyO') { autoCam = !autoCam; autoT = 0; }
+    if (e.code === 'Space') e.preventDefault();
+  });
   addEventListener('keyup', (e) => keys.delete(e.code));
   addEventListener('blur', () => keys.clear());
   // sound starts on the first click (browsers only allow audio after a user gesture)
@@ -48,7 +86,7 @@ async function start() {
   try { const v = localStorage.getItem('backrooms.volume'); if (v !== null) volEl.value = v; } catch {}
   const vol = () => volEl.value / 100;
   volEl.oninput = () => { if (audio) audio.setVolume(vol()); try { localStorage.setItem('backrooms.volume', volEl.value); } catch {} };
-  const wake = () => { try { if (!audio) { audio = createAudio(); audio.setVolume(vol()); } audio.resume(); } catch (e) { console.warn('no audio', e); } };
+  const wake = () => { try { if (!audio) { audio = createAudio(); audio.setVolume(vol()); audio.drone(drone ? 0 : -1); } audio.resume(); } catch (e) { console.warn('no audio', e); } };
   // mouse sensitivity slider, kept like the volume
   const sensEl = $('sens');
   try { const v = localStorage.getItem('backrooms.sens'); if (v !== null) sensEl.value = v; } catch {}
@@ -67,7 +105,7 @@ async function start() {
   $('go').onclick = () => { wake(); lock(); };
   canvas.onclick = () => { wake(); if (!document.pointerLockElement) lock(); };
   canvas.oncontextmenu = (e) => e.preventDefault();
-  document.addEventListener('pointerlockchange', () => { menu.classList.toggle('off', document.pointerLockElement === canvas); keys.clear(); zoom = false; skip = 2; });
+  document.addEventListener('pointerlockchange', () => { menu.classList.toggle('off', document.pointerLockElement === canvas); keys.clear(); zoom = false; skip = 2; autoCam = false; showPhotos(); });
   document.addEventListener('mousedown', (e) => { if (e.button === 2 && document.pointerLockElement === canvas) zoom = true; });
   document.addEventListener('mouseup', (e) => { if (e.button === 2) zoom = false; });
   let avg = 4, skip = 0;                      // running mean of |movement|; events to ignore after (re)locking
@@ -91,7 +129,12 @@ async function start() {
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
     R.resize(w, h);
 
-    if (document.pointerLockElement === canvas) {
+    const locked = document.pointerLockElement === canvas;
+    if (drone) {
+      const k = key;                                    // (keys are cleared whenever the mouse is let go)
+      flyDrone(seed, pos, dr, k('KeyW') - k('KeyS'), k('KeyD') - k('KeyA'), k('Space') - k('KeyC'), k('ShiftLeft') || k('ShiftRight'), cam.yaw, dt);
+    }
+    else if (locked) {
       const f = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0), s = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
       // walls and props of the level your body is in (on a stair that changes halfway up)
       const bodyLv = levelOf(py + 1.0), sB = levelSeed(seed, bodyLv);
@@ -112,32 +155,47 @@ async function start() {
         bob += sp * dt * 2.2;
       }
     }
-    // gravity: stand on whatever is under you, step up and down stairs, fall through holes
-    const g = groundAt(seed, levelOf(py + STEP), pos[0], pos[1]);
-    if (g >= py - 1e-3) { py = g; vy = 0; grounded = true; }
-    else if (grounded && py - g <= STEP) py = g;
-    else {
-      grounded = false; vy -= GRAVITY * dt; py += vy * dt;
-      if (py <= g) { py = g; vy = 0; grounded = true; }
-    }
-    camFeet = grounded ? camFeet + (py - camFeet) * (1 - Math.exp(-dt * 16)) : py;   // smooth over steps
     const ease = 1 - Math.exp(-dt * 12);
-    eye += ((crouched ? CROUCH_EYE : EYE) - eye) * ease;
     fov += ((zoom ? ZOOM_FOV : FOV) - fov) * ease;
     cam.fov = fov * Math.PI / 180;
-    cam.x = pos[0]; cam.z = pos[1]; cam.y = camFeet + eye + Math.sin(bob) * (crouched ? 0.02 : 0.035);
-    R.stream(cam.x, py, cam.z, false);
+    cam.x = pos[0]; cam.z = pos[1];
+    if (drone) cam.y = dr.y + Math.sin(now / 1000 * 1.9) * 0.012;      // a slight hover wobble
+    else {
+      // gravity: stand on whatever is under you, step up and down stairs, fall through holes
+      const g = groundAt(seed, levelOf(py + STEP), pos[0], pos[1]);
+      if (g >= py - 1e-3) { py = g; vy = 0; grounded = true; }
+      else if (grounded && py - g <= STEP) py = g;
+      else {
+        grounded = false; vy -= GRAVITY * dt; py += vy * dt;
+        if (py <= g) { py = g; vy = 0; grounded = true; }
+      }
+      camFeet = grounded ? camFeet + (py - camFeet) * (1 - Math.exp(-dt * 16)) : py;   // smooth over steps
+      eye += ((crouched ? CROUCH_EYE : EYE) - eye) * ease;
+      cam.y = camFeet + eye + Math.sin(bob) * (crouched ? 0.02 : 0.035);
+    }
+    const feet = drone ? levelOf(dr.y) * FH : py;
+    R.stream(cam.x, feet, cam.z, false);
     R.render(ctx.getCurrentTexture().createView(), cam, now / 1000);
+    // photos: read the canvas now, in the same task as the draw, before it is shown
+    if (autoCam && locked && (autoT += dt) >= AUTO_EVERY) { autoT = 0; shoot = true; }
+    if (shoot) {
+      shoot = false; photos.take(seed, cam, drone); flashT = 1;
+      if (audio) audio.shutter();
+    }
+    if (flashT > 0) { flashT = Math.max(0, flashT - dt * 5); flash.style.opacity = (flashT * 0.5).toFixed(3); }
     // (a bug in the sound must never stop the frame: the HUD below silently froze once)
-    if (audio) try { audio.update(seed, levelOf(py + 1.0), cam.x, cam.z, now / 1000); } catch (e) { console.error(e); audio = null; }
+    if (audio) try {
+      audio.update(seed, levelOf(drone ? dr.y : py + 1.0), cam.x, cam.z, now / 1000);
+      if (drone) audio.drone(Math.hypot(dv[0], dv[1], dv[2]));
+    } catch (e) { console.error(e); audio = null; }
 
     fpsT += dt; fpsN++; if (fpsT >= 0.5) {
       const st = R.stats;
-      hud.textContent = 'seed ' + seed + (stats ? '\n' + (fpsN / fpsT).toFixed(0) + ' fps  ' + w + 'x' + h + '  ' + st.tris + ' tris  chunk ' + st.chunkX + ',' + st.chunkZ + '  level ' + st.level : '');
+      hud.textContent = 'seed ' + seed + (drone ? '  ·  drone' : '') + (autoCam ? '  ·  auto camera' : '') + (photos.count ? '  ·  ' + photos.count + ' photos' : '') + (stats ? '\n' + (fpsN / fpsT).toFixed(0) + ' fps  ' + w + 'x' + h + '  ' + st.tris + ' tris  chunk ' + st.chunkX + ',' + st.chunkZ + '  level ' + st.level : '');
       fpsT = 0; fpsN = 0;
     }
   }
-  R.stream(cam.x, 0, cam.z, true);   // whole start area before the first frame
+  R.stream(cam.x, drone ? levelOf(dr.y) * FH : py, cam.z, true);   // whole start area before the first frame
   requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
 }
 

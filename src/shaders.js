@@ -110,59 +110,6 @@ fn tileMissing(lv: i32, t: vec2i) -> bool {
   return hashU(gSeed, 700u, bitcast<u32>(t.x), bitcast<u32>(t.y)) < tbl[mutation(lv, floorDiv(t.x, 5), floorDiv(t.y + 1, 5))];
 }
 
-// ---- doodles: now and then a wall carries a drawing in marker (more of them further out) ----
-fn seg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0)); }
-// distance in metres from q (relative to the drawing's centre) to the strokes of drawing h
-fn doodleDist(h: u32, q: vec2f) -> f32 {
-  let t = (h >> 4u) % 7u;
-  var d = 1e3;
-  if (t == 0u) {                                       // tally marks, in fives
-    let n = 3u + (h >> 8u) % 14u;
-    for (var k = 0u; k < n; k++) {
-      let g = f32(k / 5u) * 0.22; let j = f32(k % 5u);
-      if (k % 5u == 4u) { d = min(d, seg(q, vec2f(g - 0.24, -0.06), vec2f(g - 0.02, 0.1))); }
-      else { d = min(d, seg(q, vec2f(g - 0.2 + j * 0.04, -0.08), vec2f(g - 0.2 + j * 0.04 + 0.005, 0.1))); }
-    }
-  } else if (t == 1u) {                                // smiley face
-    d = abs(length(q) - 0.16);
-    d = min(d, length(q - vec2f(-0.055, 0.05)) - 0.01); d = min(d, length(q - vec2f(0.055, 0.05)) - 0.01);
-    let m = abs(length(q - vec2f(0.0, 0.03)) - 0.1);
-    d = min(d, select(1e3, m, q.y < -0.01));
-  } else if (t == 2u) {                                // arrow, pointing along the wall
-    let s = select(1.0, -1.0, (h & 256u) != 0u); let p = vec2f(q.x * s, q.y);
-    d = min(seg(p, vec2f(-0.25, 0.0), vec2f(0.25, 0.0)), min(seg(p, vec2f(0.25, 0.0), vec2f(0.14, 0.08)), seg(p, vec2f(0.25, 0.0), vec2f(0.14, -0.08))));
-  } else if (t == 3u || t == 6u) {                     // stick figure (t 6: arms far too long)
-    let a = select(0.13, 0.42, t == 6u);
-    d = abs(length(q - vec2f(0.0, 0.26)) - 0.06);
-    d = min(d, seg(q, vec2f(0.0, 0.2), vec2f(0.0, -0.05)));
-    d = min(d, min(seg(q, vec2f(0.0, 0.14), vec2f(-a, 0.14 - a * 0.6)), seg(q, vec2f(0.0, 0.14), vec2f(a, 0.14 - a * 0.6))));
-    d = min(d, min(seg(q, vec2f(0.0, -0.05), vec2f(-0.08, -0.28)), seg(q, vec2f(0.0, -0.05), vec2f(0.08, -0.28))));
-  } else if (t == 4u) {                                // scribble
-    let w = 0.06 * sin(q.x * 38.0 + f32(h & 63u)) + 0.04 * sin(q.x * 91.0);
-    d = select(1e3, abs(q.y - w) * 0.45, abs(q.x) < 0.3);
-  } else {                                             // a door, drawn on the wall
-    let b = abs(q - vec2f(0.0, -0.05)) - vec2f(0.22, 0.42);
-    d = abs(max(b.x, b.y));
-    d = min(d, length(q - vec2f(0.13, -0.08)) - 0.015);
-  }
-  return d;
-}
-// ink coverage at a wall point: line is the grid line, cell the edge along it, u metres along the edge
-fn doodle(salt: u32, line: i32, cell: i32, side: f32, u: f32, y: f32, d: f32, mu: f32) -> vec4f {
-  let h = hashU(seed(), salt + select(0u, 7u, side > 0.0), bitcast<u32>(line), bitcast<u32>(cell));
-  if (f32(h >> 16u) / 65536.0 >= 0.035 + 0.14 * mu) { return vec4f(0.0); }
-  if (edgeSpan(salt, line, cell).x >= 0.0) { return vec4f(0.0); }   // only on solid walls
-  let h2 = hashU(h, 41u, 7u, 3u);
-  let sc = 0.8 + 0.7 * f32(h2 & 255u) / 255.0;
-  let c = vec2f(0.7 + 1.6 * f32((h2 >> 8u) & 255u) / 255.0, 0.95 + 0.6 * f32((h2 >> 16u) & 255u) / 255.0);
-  let q = (vec2f(u, y) - c) / sc;
-  if (abs(q.x) > 0.6 || abs(q.y) > 0.6) { return vec4f(0.0); }
-  let dist = doodleDist(h, q) * sc;
-  let cov = (1.0 - smoothstep(0.004, 0.009 + d, dist)) * clamp(1.0 - d * 25.0, 0.0, 1.0) * 0.85;
-  let red = f32(h2 >> 24u) / 255.0 < mu * 0.5;        // far out, some are in something red-brown
-  return vec4f(select(vec3f(0.06, 0.055, 0.05), vec3f(0.32, 0.05, 0.03), red), cov);
-}
-
 // ---- noise ----
 fn h2(p: vec2i) -> f32 { return f32(hashU(bitcast<u32>(p.x), bitcast<u32>(p.y), 77u, 5u) >> 8u) / 16777216.0; }
 fn vnoise(p: vec2f) -> f32 {
@@ -262,13 +209,6 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
 
   let f = vec2i(floor(i.wp.xz / CELL));
   let room = cellRoom(f);
-  if (wall && i.m > 1.5 && i.m < 2.5) {
-    let side = select(n.x, n.z, alongX);
-    let ln = i32(round(select(i.wp.x, i.wp.z, alongX) / CELL));
-    let cl = select(f.y, f.x, alongX);
-    let dd = doodle(select(202u, 101u, alongX), ln, cl, side, along - f32(cl) * CELL, i.wp.y, dAlong, mu);
-    albedo = mix(albedo, dd.rgb, dd.a);
-  }
   if (room == 7) {                                     // wet room: soaked carpet, damp wicking up the walls
     if (i.m < 0.5) { albedo *= vec3f(0.55, 0.55, 0.5); }
     else if (i.m > 1.5 && i.m < 2.5) { albedo *= mix(vec3f(0.62, 0.6, 0.48), vec3f(1.0), smoothstep(0.25, 0.6 + 0.2 * vnoise(i.wp.xz * 3.0 + i.wp.y), i.wp.y)); }

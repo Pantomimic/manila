@@ -178,9 +178,10 @@ function pushCircle(pos, r, x, z, cr) {
   if (d < rr && d > 1e-6) { pos[0] = x + dx / d * rr; pos[1] = z + dz / d * rr; }
 }
 // props and special-room furniture push you out (circles; allocation free, runs every frame)
-let cPos = null, cR = 0;
+let cPos = null, cR = 0, cH = 0;
+const ITEM_TOP = [1.25, 1.0, HEIGHT, 2.1, 1.5];   // how tall each item stands (the drone flies over the low ones)
 const solidOf = (type, px, py, pz, yaw, pitch, roll, sr, len) => {
-  if (sr <= 0) return;
+  if (sr <= 0 || cH > ITEM_TOP[type] + py) return;
   if (type === ITEM_PART) {                       // thin wall: push out of its box
     const hx = yaw === 0 ? len : 0.04, hz = yaw === 0 ? 0.04 : len;
     const qx = Math.min(Math.max(cPos[0], px - hx), px + hx), qz = Math.min(Math.max(cPos[1], pz - hz), pz + hz);
@@ -194,12 +195,17 @@ const solidOf = (type, px, py, pz, yaw, pitch, roll, sr, len) => {
     pushCircle(cPos, cR, px + c, pz - sn, sr); pushCircle(cPos, cR, px - c, pz + sn, sr);
   } else pushCircle(cPos, cR, px, pz, sr);
 };
-export function collideProps(seed, lv, pos, r) {
+// hy: height of the body's bottom above the floor (0 when walking); things lower than that are skipped
+const PROP_TOP = [2.6, 0.8, 0.8, 2.2, 0, 1.4, 2.1];
+export function collideProps(seed, lv, pos, r, hy = 0) {
   const cx = Math.floor(pos[0] / CELL), cz = Math.floor(pos[1] / CELL);
-  cPos = pos; cR = r;
+  cPos = pos; cR = r; cH = hy;
   for (let z = cz - 1; z <= cz + 1; z++) for (let x = cx - 1; x <= cx + 1; x++) {
-    const c = propCircles(seed, lv, x, z);
-    for (let k = 0; k < 6; k += 3) if (c[k + 2] > 0) pushCircle(pos, r, c[k], c[k + 1], c[k + 2]);
+    const t = propAt(seed, lv, x, z)[0];
+    if (t >= 0 && hy < PROP_TOP[t]) {
+      const c = propCircles(seed, lv, x, z);
+      for (let k = 0; k < 6; k += 3) if (c[k + 2] > 0) pushCircle(pos, r, c[k], c[k + 1], c[k + 2]);
+    }
     furnish(seed, lv, x, z, solidOf);
   }
 }

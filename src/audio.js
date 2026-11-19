@@ -39,7 +39,36 @@ export function createAudio() {
   const rlp = ac.createBiquadFilter(); rlp.type = 'lowpass'; rlp.frequency.value = 160; rlp.connect(room);
   noise().connect(rlp);
 
+  // drone rotors: a thin buzz with a whir of noise, pitched up by speed; silent while walking
+  const rotor = ac.createGain(); rotor.gain.value = 0; rotor.connect(master);
+  const rlp2 = ac.createBiquadFilter(); rlp2.type = 'lowpass'; rlp2.frequency.value = 1800; rlp2.connect(rotor);
+  const rotors = [];
+  for (const [f, g] of [[182, 0.22], [188.5, 0.18], [364, 0.07]]) {
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+    const og = ac.createGain(); og.gain.value = g; o.connect(og).connect(rlp2); o.start(); rotors.push([o, f]);
+  }
+  const whir = ac.createBiquadFilter(); whir.type = 'bandpass'; whir.frequency.value = 900; whir.Q.value = 1.2;
+  const wg2 = ac.createGain(); wg2.gain.value = 0.5; noise().connect(whir).connect(wg2).connect(rotor);
+
+  // camera shutter: a short click and a softer second one
+  function shutter() {
+    const t0 = ac.currentTime;
+    for (const [dt, g] of [[0, 0.5], [0.07, 0.3]]) {
+      const s = ac.createBufferSource(); s.buffer = nb;
+      const bp = ac.createBiquadFilter(); bp.type = 'highpass'; bp.frequency.value = 2500;
+      const sg = ac.createGain(); sg.gain.setValueAtTime(g, t0 + dt); sg.gain.exponentialRampToValueAtTime(0.001, t0 + dt + 0.035);
+      s.connect(bp).connect(sg).connect(master); s.start(t0 + dt, Math.random()); s.stop(t0 + dt + 0.05);
+    }
+  }
+
   return {
+    shutter,
+    // speed in m/s, or -1 when not flying
+    drone(speed) {
+      const now = ac.currentTime, on = speed >= 0, k = 1 + Math.min(1, Math.max(0, speed) / 7) * 0.35;
+      rotor.gain.setTargetAtTime(on ? 0.05 : 0, now, on ? 0.15 : 0.3);
+      for (const [o, f] of rotors) o.frequency.setTargetAtTime(f * k, now, 0.2);
+    },
     resume() { if (ac.state !== 'running') ac.resume(); },
     toggleMute() { muted = !muted; master.gain.setTargetAtTime(level(), ac.currentTime, 0.05); return muted; },
     setVolume(v) { vol = v; master.gain.setTargetAtTime(level(), ac.currentTime, 0.05); },
