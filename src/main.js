@@ -2,6 +2,7 @@
 // Rule carried over from abyssal-garden: no allocations inside frame() (no GC stutter).
 import { collide, findSpawn } from './gen.js';
 import { createRenderer } from './render.js';
+import { createAudio } from './audio.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('c'), menu = $('menu'), hud = $('hud');
@@ -33,13 +34,15 @@ async function start() {
   // player: start in the middle of a cell (walls only sit on cell edges) that joins the open maze
   const pos = new Float64Array(findSpawn(seed));
   const cam = { x: pos[0], y: EYE, z: pos[1], yaw: (parseFloat(qs.get('yaw')) || 0) * Math.PI / 180, pitch: 0 };
-  let bob = 0, stats = false;
+  let bob = 0, stats = false, audio = null;
   const keys = new Set();
-  addEventListener('keydown', (e) => { keys.add(e.code); if (e.code === 'KeyH') stats = !stats; });
+  addEventListener('keydown', (e) => { keys.add(e.code); if (e.code === 'KeyH') stats = !stats; if (e.code === 'KeyM' && audio) audio.toggleMute(); });
   addEventListener('keyup', (e) => keys.delete(e.code));
   addEventListener('blur', () => keys.clear());
-  $('go').onclick = () => canvas.requestPointerLock();
-  canvas.onclick = () => { if (!document.pointerLockElement) canvas.requestPointerLock(); };
+  // sound starts on the first click (browsers only allow audio after a user gesture)
+  const wake = () => { try { if (!audio) audio = createAudio(); audio.resume(); } catch (e) { console.warn('no audio', e); } };
+  $('go').onclick = () => { wake(); canvas.requestPointerLock(); };
+  canvas.onclick = () => { wake(); if (!document.pointerLockElement) canvas.requestPointerLock(); };
   document.addEventListener('pointerlockchange', () => { menu.classList.toggle('off', document.pointerLockElement === canvas); keys.clear(); });
   document.addEventListener('mousemove', (e) => {
     if (document.pointerLockElement !== canvas) return;
@@ -68,6 +71,7 @@ async function start() {
     cam.x = pos[0]; cam.z = pos[1]; cam.y = EYE + Math.sin(bob) * 0.035;
     R.stream(cam.x, cam.z, false);
     R.render(ctx.getCurrentTexture().createView(), cam, now / 1000);
+    if (audio) audio.update(seed, cam.x, cam.z, now / 1000);
 
     fpsT += dt; fpsN++; if (fpsT >= 0.5) {
       const st = R.stats;

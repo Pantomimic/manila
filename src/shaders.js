@@ -1,6 +1,6 @@
 // The look: wallpaper, carpet, drop ceiling and fluorescent panels, all generated in the shader from
 // world position. Output is linear HDR; post.js adds bloom, tone mapping, vignette and grain.
-import { CELL, HEIGHT, DENSITY_U, DOOR_U, PANEL_U } from './gen.js';
+import { CELL, HEIGHT, DENSITY_U, DOOR_U, ZONE, LIGHT_U } from './gen.js';
 
 export const SCENE = /* wgsl */ `
 struct U { vp: mat4x4f, cam: vec4f, misc: vec4f };  // cam.xyz eye, cam.w time; misc.x seed
@@ -18,7 +18,7 @@ struct VO { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) 
   return o;
 }
 
-// ---- exact copy of gen.js: hashU, wall rules, panel rule ----
+// ---- exact copy of gen.js: hashU, wall rules, light rules ----
 fn hashU(a: u32, b: u32, c: u32, d: u32) -> u32 {
   var h = (a ^ 0x9e3779b9u) * 0x85ebca6bu;
   h = (h ^ (h >> 13u) ^ b) * 0xc2b2ae35u;
@@ -38,7 +38,39 @@ fn lineWall(salt: u32, line: i32, along: i32) -> bool {
 }
 fn wallH(x: i32, z: i32) -> bool { return lineWall(101u, z, x); }
 fn wallV(x: i32, z: i32) -> bool { return lineWall(202u, x, z); }
-fn panelOn(c: vec2i) -> bool { return hashU(seed(), 303u, bitcast<u32>(c.x), bitcast<u32>(c.y)) < ${PANEL_U}u; }
+fn hc(salt: u32, c: vec2i) -> u32 { return hashU(seed(), salt, bitcast<u32>(c.x), bitcast<u32>(c.y)); }
+fn unit(h: u32) -> f32 { return f32(h >> 8u) / 16777216.0; }
+// 0 dead, 1 on, 2 flickering, 3 broken cover, 4 hanging
+fn lightKind(c: vec2i) -> i32 {
+  let h = hc(303u, c);
+  let zc = vec2i(floorDiv(c.x, ${ZONE}), floorDiv(c.y, ${ZONE}));
+  if (hc(500u, zc) < ${LIGHT_U.darkZone}u) { return select(0, 2, h < ${LIGHT_U.darkFlicker}u); }
+  if (h < ${LIGHT_U.dead}u) { return 0; }
+  let k = hc(304u, c);
+  if (k < ${LIGHT_U.flicker}u) { return 2; }
+  if (k < ${LIGHT_U.broken}u) { return 3; }
+  if (k < ${LIGHT_U.hang}u) { return 4; }
+  return 1;
+}
+fn lightLevel(c: vec2i, kind: i32) -> f32 {
+  if (kind == 0) { return 0.0; }
+  let base = 0.82 + 0.18 * unit(hc(306u, c));
+  if (kind != 2 && !(kind == 4 && (hc(305u, c) & 1u) == 1u)) { return base; }
+  let t = u.cam.w;
+  let ph = unit(hc(307u, c)) * 64.0;
+  let C = vec2u(bitcast<u32>(c.x), bitcast<u32>(c.y));
+  let r = unit(hashU(seed() + 7919u, C.x, C.y, u32(i32(floor(t * 2.0 + ph)))));
+  if (r < 0.2) { return select(0.03, base, unit(hashU(seed() + 7927u, C.x, C.y, u32(i32(floor(t * 23.0 + ph * 5.0))))) < 0.55); }
+  return select(base, 0.02, r < 0.27);
+}
+// where a cell's light comes from: the ceiling panel, or the middle of a hanging one
+fn lightPos(c: vec2i, kind: i32) -> vec3f {
+  let m = vec3f((f32(c.x) + 0.5) * CELL, HEIGHT - 0.05, (f32(c.y) + 0.5) * CELL);
+  if (kind != 4) { return m; }
+  let a = 0.65 + 0.5 * unit(hc(310u, c));
+  let s = select(-1.0, 1.0, (hc(311u, c) & 1u) == 1u);
+  return vec3f(m.x, HEIGHT - 0.1 - 0.6 * sin(a) - 0.1, m.z - s * 0.6 + s * 0.6 * cos(a));
+}
 
 // ---- light visibility. The line from a surface point to a light in a neighbouring cell crosses at
 // most one vertical and one horizontal grid line; a wall on the edge it crosses blocks the light.
@@ -77,8 +109,15 @@ fn wallpaper(along: f32, y: f32, side: f32, d: f32) -> vec3f {
   let dia = 1.0 - smoothstep(0.022, 0.03, (0.08 - du) * 1.2 + dv * 0.5);
   c *= 1.0 - dia * 0.07 * aa;
   let n = fbm(vec2f(along * 0.9 + side * 31.0, y * 0.9));
-  let stain = smoothstep(0.5, 0.78, n * 0.85 + (y - HEIGHT + 0.8) * 0.45);  // water damage from the ceiling
-  c = mix(c, c * vec3f(0.70, 0.60, 0.42), stain);
+  let sv = n * 0.85 + (y - HEIGHT + 0.8) * 0.45;                          // water damage from the ceiling
+  let stain = smoothstep(0.5, 0.78, sv);
+  let tn = vnoise(vec2f(along * 0.22 + side * 13.0, 3.7));               // stain colour drifts along the wall:
+  var tint = mix(vec3f(0.72, 0.60, 0.40), vec3f(0.60, 0.62, 0.38), smoothstep(0.35, 0.7, tn));   // brown -> sickly green
+  tint = mix(tint, vec3f(0.66, 0.44, 0.30), smoothstep(0.62, 0.85, vnoise(vec2f(along * 0.31 - side * 5.0, 8.1))));  // rust
+  tint = mix(tint, vec3f(0.48, 0.44, 0.36), smoothstep(0.7, 0.9, vnoise(vec2f(along * 0.17 + 40.0, side))));  // grey mildew
+  c = mix(c, c * tint, stain);
+  let rim = smoothstep(0.47, 0.5, sv) * (1.0 - smoothstep(0.5, 0.56, sv)); // darker tide line at the edge
+  c *= 1.0 - rim * 0.14 * clamp(1.0 - d * 20.0, 0.0, 1.0);
   let streak = smoothstep(0.72, 0.9, vnoise(vec2f(along * 5.0 + side * 7.0, y * 0.35))) * smoothstep(0.6, 2.2, y);
   c = mix(c, c * vec3f(0.80, 0.72, 0.55), streak * 0.6);
   c *= 1.0 - 0.22 * (1.0 - smoothstep(0.0, 0.6, y)) * n;                  // scuffs low on the wall
@@ -121,7 +160,9 @@ fn ceiling(p: vec2f, d: f32) -> vec3f {
   var albedo: vec3f;
   if (i.m < 0.5) { albedo = carpet(i.wp.xz, dFloor); }
   else if (i.m < 1.5) { albedo = ceiling(i.wp.xz, dFloor); }
-  else { albedo = wallpaper(along, i.wp.y, n.x * 2.0 + n.z, dAlong); }
+  else if (i.m < 2.5) { albedo = wallpaper(along, i.wp.y, n.x * 2.0 + n.z, dAlong); }
+  else if (i.m < 4.5) { albedo = vec3f(0.55, 0.55, 0.52); }   // light housing
+  else { albedo = vec3f(0.05, 0.05, 0.05); }                  // cable
 
   let f = vec2i(floor(i.wp.xz / CELL));
   var light = vec3f(0.018, 0.016, 0.011);
@@ -129,8 +170,10 @@ fn ceiling(p: vec2f, d: f32) -> vec3f {
   for (var dz = -1; dz <= 1; dz++) {
     for (var dx = -1; dx <= 1; dx++) {
       let c = f + vec2i(dx, dz);
-      if (!panelOn(c)) { continue; }
-      let lp = vec3f((f32(c.x) + 0.5) * CELL, HEIGHT - 0.05, (f32(c.y) + 0.5) * CELL);
+      let kind = lightKind(c);
+      let level = lightLevel(c, kind);
+      if (level <= 0.0) { continue; }
+      let lp = lightPos(c, kind);
       var vis = 1.0;
       if (dx != 0) {
         let X = f.x + max(dx, 0); let t = (f32(X) * CELL - i.wp.x) / (lp.x - i.wp.x);
@@ -146,7 +189,8 @@ fn ceiling(p: vec2f, d: f32) -> vec3f {
       let ndl = max(dot(n, v * inverseSqrt(d2)), 0.0) + up;
       let hz = dot(v.xz, v.xz) / (1.5 * CELL * 1.5 * CELL);           // fades to 0 before the 3x3 window ends
       let win = max(1.0 - hz, 0.0);
-      light += vec3f(1.0, 0.97, 0.86) * (3.6 * vis * ndl * win * win / (d2 + 0.8));
+      let tint = select(vec3f(1.0, 0.97, 0.86), vec3f(0.93, 1.0, 0.95), kind == 3);   // bare tubes run cold and green
+      light += tint * (3.6 * level * vis * ndl * win * win / (d2 + 0.8));
     }
   }
   var col = albedo * light;
@@ -156,12 +200,26 @@ fn ceiling(p: vec2f, d: f32) -> vec3f {
     let l = (fract(i.wp.xz / CELL) - 0.5) * CELL;
     let e = vec2f(0.3, 0.6) - abs(l);
     if (min(e.x, e.y) > 0.0) {
-      if (min(e.x, e.y) < 0.03) { col = vec3f(0.62, 0.62, 0.58) * light; }            // metal frame
-      else if (panelOn(f)) {
+      let kind = lightKind(f);
+      let level = lightLevel(f, kind);
+      if (min(e.x, e.y) < 0.03 && kind != 4) { col = vec3f(0.62, 0.62, 0.58) * light; }   // metal frame
+      else if (kind == 4) { col = vec3f(0.003, 0.0028, 0.0025); }                // empty hole in the grid
+      else if (kind == 3) {                                                                // cover gone: two bare tubes
+        let tube = 1.0 - smoothstep(0.018, 0.026, abs(abs(l.x) - 0.1));
+        let dead2 = select(1.0, 0.0, (hc(312u, f) & 1u) == 1u && l.x > 0.0);              // often one tube is out
+        let refl = vec3f(0.36, 0.36, 0.34) * (light + 0.3 * level);
+        col = mix(refl, vec3f(0.92, 1.0, 0.95) * 12.0 * level * dead2 + vec3f(0.2) * (1.0 - dead2) * light, tube);
+      }
+      else if (level > 0.05) {
         let grid = 0.94 + 0.06 * step(0.5, fract(l.x * 40.0)) * clamp(1.0 - dFloor * 60.0, 0.0, 1.0);
-        col = vec3f(1.0, 0.98, 0.88) * 7.0 * grid * smoothstep(0.03, 0.09, min(e.x, e.y) + 0.03);
-      } else { col = vec3f(0.16, 0.16, 0.15) * (light + 0.05); }                       // dead tube
+        col = vec3f(1.0, 0.98, 0.88) * 7.0 * level * grid * smoothstep(0.03, 0.09, min(e.x, e.y) + 0.03);
+      } else { col = vec3f(0.16, 0.16, 0.15) * (light + 0.05); }                          // dead (or flickered off)
     }
+  }
+  // the diffuser of a hanging panel
+  if (i.m > 3.5 && i.m < 4.5) {
+    let level = lightLevel(f, 4);
+    col = select(vec3f(0.16, 0.16, 0.15) * (light + 0.05), vec3f(1.0, 0.98, 0.88) * 6.0 * level, level > 0.05);
   }
 
   let dist = length(i.wp - u.cam.xyz);
