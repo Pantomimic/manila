@@ -2,7 +2,8 @@
 // follows the working panels around you, a harsher crackle that switches on and off with flickering
 // panels, and a faint room tone that stays when the lights are gone.
 // update() runs every frame and allocates nothing.
-import { CELL, lightKind, lightLevel } from './gen.js';
+import { CELL, lightLevel } from './gen.js';
+import { cellLight, levelSeed } from './levels.js';
 
 export function createAudio() {
   const ac = new (window.AudioContext || window.webkitAudioContext)();
@@ -43,19 +44,20 @@ export function createAudio() {
     toggleMute() { muted = !muted; master.gain.setTargetAtTime(level(), ac.currentTime, 0.05); return muted; },
     setVolume(v) { vol = v; master.gain.setTargetAtTime(level(), ac.currentTime, 0.05); },
     // listener at (x, z) metres, t = the same clock the shader flickers by
-    update(seed, x, z, t) {
+    update(seed, lv, x, z, t) {
+      const sL = levelSeed(seed, lv);
       const cx = Math.floor(x / CELL), cz = Math.floor(z / CELL);
       let steady = 0, flick = 0;
       for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
-        const X = cx + dx, Z = cz + dz, k = lightKind(seed, X, Z);
+        const X = cx + dx, Z = cz + dz, k = cellLight(seed, lv, X, Z);
         if (k === 0) continue;
         const lx = (X + 0.5) * CELL - x, lz = (Z + 0.5) * CELL - z;
         const w = 1 / (1 + (lx * lx + lz * lz) / 6);
-        const lv = lightLevel(seed, X, Z, k, t);
+        const lv = lightLevel(sL, X, Z, k, t);
         steady += w * lv;
         if (k === 2 || k === 4) {
           // a flickering panel crackles while it is stuttering (its level jumps between frames)
-          const prev = lightLevel(seed, X, Z, k, t - 0.045);
+          const prev = lightLevel(sL, X, Z, k, t - 0.045);
           if (Math.abs(prev - lv) > 0.3 || lv < 0.1) flick += w;
         }
       }

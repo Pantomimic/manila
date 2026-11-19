@@ -1,14 +1,16 @@
 // The renderer: chunk streaming, the scene pass and post-processing. No DOM access, so the same code
 // runs in the browser (main.js) and headless in Node for screenshots (tools/shot.mjs).
 // No allocations in render() apart from what WebGPU itself needs per frame.
-import { CELL, CHUNK, MAX_VERTS, buildChunk, edgeSpan, lightKind, SALT_H, SALT_V } from './gen.js';
+import { CELL, CHUNK, MAX_VERTS, edgeSpan, SALT_H, SALT_V } from './gen.js';
+import { FH, buildLevelChunk, levelSeed, levelOf, cellLight } from './levels.js';
 import { SCENE } from './shaders.js';
 import { POST } from './post.js';
 
 const HDR = 'rgba16float', DEPTH = 'depth24plus', MSAA = 4, LEVELS = 5;
 // Chunks within RANGE (in chunks, square) of the camera's chunk are kept loaded. 3 -> 7x7 chunks,
-// 72 m in every direction, well past where the fog swallows everything.
-const RANGE = 3, SLOTS = (2 * RANGE + 1) ** 2, BUILDS_PER_FRAME = 2;
+// 72 m in every direction, well past where the fog swallows everything. The levels above and below
+// are only seen through holes and stairwells, so they get RANGE2.
+const RANGE = 3, RANGE2 = 1, SLOTS = (2 * RANGE + 1) ** 2 + 2 * (2 * RANGE2 + 1) ** 2, BUILDS_PER_FRAME = 2;
 const FOV = 75 * Math.PI / 180;
 export const EXPOSURE = 1.0, BLOOM = 0.12, GRAIN = 0.035;
 
@@ -19,57 +21,66 @@ export function createRenderer(device, outFormat, seed) {
   const SLOT_BYTES = MAX_VERTS * 28;
   const vbuf = device.createBuffer({ size: SLOT_BYTES * SLOTS, usage: BU.VERTEX | BU.COPY_DST });
   const scratch = new Float32Array(MAX_VERTS * 7);
-  const slotCX = new Int32Array(SLOTS), slotCZ = new Int32Array(SLOTS), slotN = new Int32Array(SLOTS);
+  const slotCX = new Int32Array(SLOTS), slotCZ = new Int32Array(SLOTS), slotLV = new Int32Array(SLOTS), slotN = new Int32Array(SLOTS);
   const slotUsed = new Uint8Array(SLOTS);
-  const want = new Int32Array(SLOTS * 2);          // chunks still to build, nearest first
-  let nWant = 0, wantHead = 0, curCX = 1e9, curCZ = 1e9;
-  const loadChunk = (slot, cx, cz) => {
-    const n = buildChunk(seed, cx, cz, scratch);
+  const want = new Int32Array(SLOTS * 3);          // chunks still to build (cx, cz, level), nearest first
+  let nWant = 0, wantHead = 0, curCX = 1e9, curCZ = 1e9, curLV = 1e9;
+  const loadChunk = (slot, cx, cz, lv) => {
+    const n = buildLevelChunk(seed, lv, cx, cz, scratch);
     Q.writeBuffer(vbuf, slot * SLOT_BYTES, scratch, 0, n * 7);
-    slotCX[slot] = cx; slotCZ[slot] = cz; slotN[slot] = n; slotUsed[slot] = 1;
+    slotCX[slot] = cx; slotCZ[slot] = cz; slotLV[slot] = lv; slotN[slot] = n; slotUsed[slot] = 1;
   };
-  const isLoaded = (cx, cz) => { for (let i = 0; i < SLOTS; i++) if (slotUsed[i] && slotCX[i] === cx && slotCZ[i] === cz) return true; return false; };
+  const isLoaded = (cx, cz, lv) => { for (let i = 0; i < SLOTS; i++) if (slotUsed[i] && slotCX[i] === cx && slotCZ[i] === cz && slotLV[i] === lv) return true; return false; };
   // ---- world data the shader reads instead of re-deriving it per pixel: a DATA x DATA cell window
-  // around the camera, addressed by world cell mod DATA. Texels [0, DATA) hold the horizontal edge of
-  // each cell, [DATA, 2 DATA) the vertical edge (both as edgeSpan floats), [2 DATA, 3 DATA) the light kind.
+  // around the camera, addressed by world cell mod DATA, for the levels below, at and above the
+  // camera (texture rows [0, DATA), [DATA, 2 DATA), [2 DATA, 3 DATA)). Columns [0, DATA) hold the
+  // horizontal edge of each cell, [DATA, 2 DATA) the vertical edge (both as edgeSpan floats),
+  // [2 DATA, 3 DATA) the light kind.
   const DATA = 64;
-  const dataArr = new Float32Array(DATA * 3 * DATA * 4);
-  const dataTex = device.createTexture({ size: [DATA * 3, DATA], format: 'rgba32float', usage: TU.TEXTURE_BINDING | TU.COPY_DST });
-  const fillData = (pcx, pcz) => {
+  const dataArr = new Float32Array(DATA * 3 * DATA * 3 * 4);
+  const dataTex = device.createTexture({ size: [DATA * 3, DATA * 3], format: 'rgba32float', usage: TU.TEXTURE_BINDING | TU.COPY_DST });
+  const fillData = (pcx, pcz, plv) => {
     const bx = pcx * CHUNK - 28, bz = pcz * CHUNK - 28;      // covers the loaded chunks plus one cell
-    for (let z = bz; z < bz + DATA; z++) for (let x = bx; x < bx + DATA; x++) {
-      const row = (z & (DATA - 1)) * DATA * 3, col = x & (DATA - 1);
-      edgeSpan(seed, SALT_H, z, x, dataArr, (row + col) * 4);
-      edgeSpan(seed, SALT_V, x, z, dataArr, (row + DATA + col) * 4);
-      dataArr[(row + 2 * DATA + col) * 4] = lightKind(seed, x, z);
+    for (let li = 0; li < 3; li++) {
+      const lv = plv - 1 + li, sL = levelSeed(seed, lv);
+      for (let z = bz; z < bz + DATA; z++) for (let x = bx; x < bx + DATA; x++) {
+        const row = ((z & (DATA - 1)) + li * DATA) * DATA * 3, col = x & (DATA - 1);
+        edgeSpan(sL, SALT_H, z, x, dataArr, (row + col) * 4);
+        edgeSpan(sL, SALT_V, x, z, dataArr, (row + DATA + col) * 4);
+        dataArr[(row + 2 * DATA + col) * 4] = cellLight(seed, lv, x, z);
+      }
     }
-    Q.writeTexture({ texture: dataTex }, dataArr, { bytesPerRow: DATA * 3 * 16 }, [DATA * 3, DATA]);
+    Q.writeTexture({ texture: dataTex }, dataArr, { bytesPerRow: DATA * 3 * 16 }, [DATA * 3, DATA * 3]);
   };
-  const recenter = (pcx, pcz) => {
-    curCX = pcx; curCZ = pcz; nWant = 0; wantHead = 0;
-    fillData(pcx, pcz);
-    for (let i = 0; i < SLOTS; i++) if (slotUsed[i] && (Math.abs(slotCX[i] - pcx) > RANGE || Math.abs(slotCZ[i] - pcz) > RANGE)) slotUsed[i] = 0;
-    for (let ring = 0; ring <= RANGE; ring++) for (let dz = -ring; dz <= ring; dz++) for (let dx = -ring; dx <= ring; dx++) {
-      if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring || isLoaded(pcx + dx, pcz + dz)) continue;
-      want[nWant * 2] = pcx + dx; want[nWant * 2 + 1] = pcz + dz; nWant++;
+  const recenter = (pcx, pcz, plv) => {
+    curCX = pcx; curCZ = pcz; curLV = plv; nWant = 0; wantHead = 0;
+    fillData(pcx, pcz, plv);
+    const range = (lv) => lv === plv ? RANGE : RANGE2;
+    for (let i = 0; i < SLOTS; i++) if (slotUsed[i] && (Math.abs(slotLV[i] - plv) > 1 || Math.abs(slotCX[i] - pcx) > range(slotLV[i]) || Math.abs(slotCZ[i] - pcz) > range(slotLV[i]))) slotUsed[i] = 0;
+    for (let ring = 0; ring <= RANGE; ring++) for (const lv of [plv, plv - 1, plv + 1]) {
+      if (ring > range(lv)) continue;
+      for (let dz = -ring; dz <= ring; dz++) for (let dx = -ring; dx <= ring; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring || isLoaded(pcx + dx, pcz + dz, lv)) continue;
+        want[nWant * 3] = pcx + dx; want[nWant * 3 + 1] = pcz + dz; want[nWant * 3 + 2] = lv; nWant++;
+      }
     }
   };
   const pump = (limit) => {
     for (let k = 0; k < limit && wantHead < nWant; k++, wantHead++) {
       let slot = 0; while (slotUsed[slot]) slot++;
-      loadChunk(slot, want[wantHead * 2], want[wantHead * 2 + 1]);
+      loadChunk(slot, want[wantHead * 3], want[wantHead * 3 + 1], want[wantHead * 3 + 2]);
     }
   };
   const chunkOf = (m) => Math.floor(m / (CHUNK * CELL));
-  // keep the area around (x, z) loaded; all = build everything missing now instead of a few per frame
-  function stream(x, z, all) {
-    const cx = chunkOf(x), cz = chunkOf(z);
-    if (cx !== curCX || cz !== curCZ) recenter(cx, cz);
+  // keep the area around (x, z) on the level of height y (feet) loaded; all = build everything missing now
+  function stream(x, y, z, all) {
+    const cx = chunkOf(x), cz = chunkOf(z), lv = levelOf(y);
+    if (cx !== curCX || cz !== curCZ || lv !== curLV) recenter(cx, cz, lv);
     pump(all ? SLOTS : BUILDS_PER_FRAME);
   }
 
   // ---- scene pipeline ----
-  const UB = new Float32Array(24);
+  const UB = new Float32Array(28);
   const ubo = device.createBuffer({ size: UB.byteLength, usage: BU.UNIFORM | BU.COPY_DST });
   const sceneMod = device.createShaderModule({ code: SCENE });
   const scenePipe = device.createRenderPipeline({
@@ -140,11 +151,12 @@ export function createRenderer(device, outFormat, seed) {
     }
   }
 
-  const stats = { tris: 0, chunkX: 0, chunkZ: 0 };
+  const stats = { tris: 0, chunkX: 0, chunkZ: 0, level: 0 };
   // cam: { x, y, z, yaw, pitch, fov? (radians) }; out: the texture view to draw the final image into
   function render(out, cam, time) {
     matrices(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.fov || FOV);
     UB[16] = cam.x; UB[17] = cam.y; UB[18] = cam.z; UB[19] = time; UB[20] = seed;
+    UB[24] = curLV; UB[25] = levelSeed(seed, curLV - 1); UB[26] = levelSeed(seed, curLV); UB[27] = levelSeed(seed, curLV + 1);
     Q.writeBuffer(ubo, 0, UB);
     PU[0] = time; PU[1] = EXPOSURE; PU[2] = BLOOM; PU[3] = GRAIN;
     Q.writeBuffer(puBuf, 0, PU);
@@ -169,7 +181,7 @@ export function createRenderer(device, outFormat, seed) {
     finalAtt.view = out;
     pass = enc.beginRenderPass(finalPass); pass.setPipeline(pFinal); pass.setBindGroup(0, finalBG); pass.draw(3); pass.end();
     Q.submit([enc.finish()]);
-    stats.tris = verts / 3; stats.chunkX = curCX; stats.chunkZ = curCZ;
+    stats.tris = verts / 3; stats.chunkX = curCX; stats.chunkZ = curCZ; stats.level = curLV;
   }
 
   return { resize, stream, render, stats, get width() { return W; }, get height() { return H; } };

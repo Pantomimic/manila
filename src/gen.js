@@ -186,14 +186,18 @@ export const hangDir = (seed, x, z) => (hashU(seed, 311, x, z) & 1) ? 1 : -1;
 // two halves meet flush (no z-fighting).
 export const CHUNK = 8;
 export const MAX_HANG = 4;                              // hanging panels built per chunk (they're rare)
-export const MAX_VERTS = 7000;   // measured worst case ~4900 over 22k chunks; buildChunk stops writing at the limit
+export const MAX_VERTS = 12000;   // measured worst case ~4900 over 22k chunks; buildChunk stops writing at the limit
 const FLOATS = 7;                                       // [px, py, pz, nx, ny, nz, material]
 
 // Writes the chunk's triangles into out (a Float32Array of at least MAX_VERTS * 7) and returns the
 // vertex count. Materials: 0 carpet, 1 ceiling, 2 wallpaper, 3 light housing, 4 light diffuser, 5 cable.
-export function buildChunk(seed, cx, cz, out) {
+// opt (all optional): y0 = height of this floor; floorHole / ceilHole(x, z, rect) -> true and rect =
+// [x0, z0, x1, z1] in metres when the cell's floor / ceiling has an opening; light(x, z) -> light kind.
+const rectH = new Float64Array(4);
+export function buildChunk(seed, cx, cz, out, opt = {}) {
+  const y0 = opt.y0 || 0;
   let n = 0;
-  const vert = (x, y, z, nx, ny, nz, m) => { if (n + FLOATS > out.length) return; out[n] = x; out[n + 1] = y; out[n + 2] = z; out[n + 3] = nx; out[n + 4] = ny; out[n + 5] = nz; out[n + 6] = m; n += FLOATS; };
+  const vert = (x, y, z, nx, ny, nz, m) => { if (n + FLOATS > out.length) return; out[n] = x; out[n + 1] = y + y0; out[n + 2] = z; out[n + 3] = nx; out[n + 4] = ny; out[n + 5] = nz; out[n + 6] = m; n += FLOATS; };
   const quad = (ax, ay, az, bx, by, bz, cx_, cy, cz_, dx, dy, dz, nx, ny, nz, m) => {
     vert(ax, ay, az, nx, ny, nz, m); vert(bx, by, bz, nx, ny, nz, m); vert(cx_, cy, cz_, nx, ny, nz, m);
     vert(ax, ay, az, nx, ny, nz, m); vert(cx_, cy, cz_, nx, ny, nz, m); vert(dx, dy, dz, nx, ny, nz, m);
@@ -201,8 +205,20 @@ export function buildChunk(seed, cx, cz, out) {
   const H = HEIGHT;
   const x0 = cx * CHUNK, z0 = cz * CHUNK, x1 = x0 + CHUNK, z1 = z0 + CHUNK;
   const X0 = x0 * CELL, X1 = x1 * CELL, Z0 = z0 * CELL, Z1 = z1 * CELL;
-  quad(X0, 0, Z0, X0, 0, Z1, X1, 0, Z1, X1, 0, Z0, 0, 1, 0, 0);
-  quad(X0, H, Z0, X1, H, Z0, X1, H, Z1, X0, H, Z1, 0, -1, 0, 1);
+  // floor and ceiling, one quad per cell, or a frame of four around an opening
+  const slabAt = (y, ny, m, hole) => {
+    const rect = (ax, az, bx, bz) => { if (bx - ax > 1e-4 && bz - az > 1e-4) quad(ax, y, az, ax, y, bz, bx, y, bz, bx, y, az, 0, ny, 0, m); };
+    for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) {
+      const ax = x * CELL, az = z * CELL, bx = ax + CELL, bz = az + CELL;
+      if (!hole || !hole(x, z, rectH)) { rect(ax, az, bx, bz); continue; }
+      const [hx0, hz0, hx1, hz1] = rectH;
+      rect(ax, az, bx, hz0); rect(ax, hz1, bx, bz); rect(ax, hz0, hx0, hz1); rect(hx1, hz0, bx, hz1);
+    }
+  };
+  if (!opt.floorHole && !opt.ceilHole) {
+    quad(X0, 0, Z0, X0, 0, Z1, X1, 0, Z1, X1, 0, Z0, 0, 1, 0, 0);
+    quad(X0, H, Z0, X1, H, Z0, X1, H, Z1, X0, H, Z1, 0, -1, 0, 1);
+  } else { slabAt(0, 1, 0, opt.floorHole); slabAt(H, -1, 1, opt.ceilHole); }
   // Everything on a grid line is built in line-local coordinates: a = metres along the line, o = sideways
   // offset from it, y = height. P maps them to world space for a horizontal (hor) or vertical line.
   let hor = true, LW = 0;
@@ -288,7 +304,7 @@ export function buildChunk(seed, cx, cz, out) {
   // hanging panels: a 0.6 x 1.2 m box hinged at one short end, the other end swung down, plus a cable
   let hung = 0;
   for (let z = z0; z < z1 && hung < MAX_HANG; z++) for (let x = x0; x < x1 && hung < MAX_HANG; x++) {
-    if (lightKind(seed, x, z) !== 4) continue;
+    if ((opt.light ? opt.light(x, z) : lightKind(seed, x, z)) !== 4) continue;
     hung++;
     const a = hangAngle(seed, x, z), s = hangDir(seed, x, z), ca = Math.cos(a), sa = Math.sin(a);
     const mx = (x + 0.5) * CELL, mz = (z + 0.5) * CELL, py = H - 0.1, pz = mz - s * 0.6;

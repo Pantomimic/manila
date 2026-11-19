@@ -2,13 +2,14 @@
 // Rule carried over from abyssal-garden: no allocations inside frame() (no GC stutter).
 import { collide, cramped, findSpawn } from './gen.js';
 import { createRenderer } from './render.js';
+import { levelOf, levelSeed, groundAt, ceilAt, collideProps } from './levels.js';
 import { createAudio } from './audio.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('c'), menu = $('menu'), hud = $('hud');
 const EYE = 1.6, CROUCH_EYE = 0.95, RADIUS = 0.3, WALK = 2.4, RUN = 5.6, SNEAK = 1.2;
 const TALL = 1.75, SHORT = 1.1;                     // player height standing / crouched, for low doorways
-const FOV = 75, ZOOM_FOV = 28;
+const FOV = 75, ZOOM_FOV = 28, STEP = 0.75, GRAVITY = 12;
 
 function pickSeed() {
   const q = new URLSearchParams(location.search).get('seed');
@@ -37,6 +38,7 @@ async function start() {
   const pos = new Float64Array(findSpawn(seed));
   const cam = { x: pos[0], y: EYE, z: pos[1], yaw: (parseFloat(qs.get('yaw')) || 0) * Math.PI / 180, pitch: 0, fov: FOV * Math.PI / 180 };
   let bob = 0, stats = false, audio = null, crouched = false, eye = EYE, fov = FOV, zoom = false;
+  let py = 0, vy = 0, grounded = true, camFeet = 0;    // feet height; levels are FH apart
   const keys = new Set();
   addEventListener('keydown', (e) => { keys.add(e.code); if (e.code === 'KeyH') stats = !stats; if (e.code === 'KeyM' && audio) audio.toggleMute(); });
   addEventListener('keyup', (e) => keys.delete(e.code));
@@ -91,33 +93,50 @@ async function start() {
 
     if (document.pointerLockElement === canvas) {
       const f = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0), s = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+      // walls and props of the level your body is in (on a stair that changes halfway up)
+      const bodyLv = levelOf(py + 1.0), sB = levelSeed(seed, bodyLv);
       // hold C to crouch; you stay down while something low is overhead
       if (keys.has('KeyC')) crouched = true;
-      else if (crouched && !cramped(seed, pos, RADIUS, TALL)) crouched = false;
+      else if (crouched && !cramped(sB, pos, RADIUS, TALL) && py + TALL < ceilAt(seed, levelOf(py), pos[0], pos[1])) crouched = false;
       if (f || s) {
         const sp = crouched ? SNEAK : (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? RUN : WALK, inv = sp * dt / Math.hypot(f, s);
-        const sy = Math.sin(cam.yaw), cy = Math.cos(cam.yaw);
+        const sy = Math.sin(cam.yaw), cy = Math.cos(cam.yaw), ox = pos[0], oz = pos[1], tall = crouched ? SHORT : TALL;
         pos[0] += (sy * f + cy * s) * inv; pos[1] += (-cy * f + sy * s) * inv;
-        collide(seed, pos, RADIUS, crouched ? SHORT : TALL);
+        collide(sB, pos, RADIUS, tall);
+        collideProps(seed, bodyLv, pos, RADIUS);
+        // a step too high (the side of a stair) or a ceiling too low for your head: you don't move
+        if (grounded) {
+          const g = groundAt(seed, levelOf(py + STEP), pos[0], pos[1]);
+          if (g - py > STEP || Math.max(g, py) + tall > ceilAt(seed, levelOf(Math.max(g, py)), pos[0], pos[1])) { pos[0] = ox; pos[1] = oz; }
+        }
         bob += sp * dt * 2.2;
       }
     }
+    // gravity: stand on whatever is under you, step up and down stairs, fall through holes
+    const g = groundAt(seed, levelOf(py + STEP), pos[0], pos[1]);
+    if (g >= py - 1e-3) { py = g; vy = 0; grounded = true; }
+    else if (grounded && py - g <= STEP) py = g;
+    else {
+      grounded = false; vy -= GRAVITY * dt; py += vy * dt;
+      if (py <= g) { py = g; vy = 0; grounded = true; }
+    }
+    camFeet = grounded ? camFeet + (py - camFeet) * (1 - Math.exp(-dt * 16)) : py;   // smooth over steps
     const ease = 1 - Math.exp(-dt * 12);
     eye += ((crouched ? CROUCH_EYE : EYE) - eye) * ease;
     fov += ((zoom ? ZOOM_FOV : FOV) - fov) * ease;
     cam.fov = fov * Math.PI / 180;
-    cam.x = pos[0]; cam.z = pos[1]; cam.y = eye + Math.sin(bob) * (crouched ? 0.02 : 0.035);
-    R.stream(cam.x, cam.z, false);
+    cam.x = pos[0]; cam.z = pos[1]; cam.y = camFeet + eye + Math.sin(bob) * (crouched ? 0.02 : 0.035);
+    R.stream(cam.x, py, cam.z, false);
     R.render(ctx.getCurrentTexture().createView(), cam, now / 1000);
-    if (audio) audio.update(seed, cam.x, cam.z, now / 1000);
+    if (audio) audio.update(seed, levelOf(py + 1.0), cam.x, cam.z, now / 1000);
 
     fpsT += dt; fpsN++; if (fpsT >= 0.5) {
       const st = R.stats;
-      hud.textContent = 'seed ' + seed + (stats ? '\n' + (fpsN / fpsT).toFixed(0) + ' fps  ' + w + 'x' + h + '  ' + st.tris + ' tris  chunk ' + st.chunkX + ',' + st.chunkZ : '');
+      hud.textContent = 'seed ' + seed + (stats ? '\n' + (fpsN / fpsT).toFixed(0) + ' fps  ' + w + 'x' + h + '  ' + st.tris + ' tris  chunk ' + st.chunkX + ',' + st.chunkZ + '  level ' + st.level : '');
       fpsT = 0; fpsN = 0;
     }
   }
-  R.stream(cam.x, cam.z, true);   // whole start area before the first frame
+  R.stream(cam.x, 0, cam.z, true);   // whole start area before the first frame
   requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
 }
 
