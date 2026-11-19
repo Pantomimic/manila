@@ -56,9 +56,11 @@ const mutF = (seed, x, z) => mutation(lvOf(seed), x, z) / 8;          // 0..1
 //   5 frames: a door frame standing in every cell, all facing the same way
 //   6 red: the lights burn red        7 wet: the carpet is soaked and shines, the walls wick damp
 //   8 cubicles: a farm of chest-high partitions, desks in some of the stalls
-export const RB = 12, ROOM_THEMES = 9;
+//   9 pool: a drained, tiled pool sunk into the floor     10 hallway: one cell wide and long; it loops
+//   11 follow: only the light above you is on              12 closet: one cell, one way in, a door that goes nowhere
+export const RB = 12, ROOM_THEMES = 13;
 let rSeed = -1, rBX = 1e9, rBZ = 1e9, rOn = false;
-export let rX0 = 0, rZ0 = 0, rX1 = 0, rZ1 = 0, rTheme = 0, rH = 0;
+export let rX0 = 0, rZ0 = 0, rX1 = 0, rZ1 = 0, rTheme = 0, rH = 0, rSides = 0;   // rSides: bit per side with a doorway
 function roomAt(seed, bx, bz) {
   if (bx === rBX && bz === rBZ && seed === rSeed) return rOn;
   rSeed = seed; rBX = bx; rBZ = bz;
@@ -66,8 +68,14 @@ function roomAt(seed, bx, bz) {
   rOn = hashU(seed, 800, bx, bz) < U(0.14 + 0.03 * m);
   if (!rOn) return false;
   rTheme = hashU(seed, 805, bx, bz) % ROOM_THEMES; rH = hashU(seed, 806, bx, bz);
-  const big = rTheme === 1 || rTheme === 2 || rTheme === 8 ? 2 : 4;               // furniture rooms stay smaller (vertex budget)
-  const w = 4 + hashU(seed, 801, bx, bz) % big, d = 4 + hashU(seed, 802, bx, bz) % big;
+  const big = rTheme === 1 || rTheme === 2 || rTheme === 8 ? 2 : rTheme === 9 ? 3 : 4;   // furniture rooms stay smaller (vertex budget)
+  const lo = rTheme === 9 ? 5 : 4;
+  let w = lo + hashU(seed, 801, bx, bz) % big, d = lo + hashU(seed, 802, bx, bz) % big;
+  rSides = (1 << (rH & 3)) | (1 << (rH & 3 ^ 1)) | ((rH >>> 4) & 15);   // 0/1 and 2/3 are opposite: always a way through
+  if (rTheme === 10) {                                   // hallway: open only at its two ends
+    const L = 10;                                       // (the loop in main.js needs exactly this)
+    if (rH & 4) { w = L; d = 1; rSides = 12; } else { w = 1; d = L; rSides = 3; }
+  } else if (rTheme === 12) { w = d = 1; rSides = 1 << (rH & 3); }
   rX0 = bx * RB + 1 + hashU(seed, 803, bx, bz) % (RB - 1 - w); rX1 = rX0 + w;
   rZ0 = bz * RB + 1 + hashU(seed, 804, bx, bz) % (RB - 1 - d); rZ1 = rZ0 + d;
   return true;
@@ -91,8 +99,8 @@ function roomEdge(seed, salt, line, along) {
     if (x > rX0 && x < rX1) return 0;
     side = x === rX0 ? 2 : 3; a0 = rZ0; len = rZ1 - rZ0;
   }
-  const sides = (1 << (rH & 3)) | (1 << (rH & 3 ^ 1)) | ((rH >>> 4) & 15);   // 0/1 and 2/3 are opposite
-  return (sides >> side & 1) && along === a0 + 1 + hashU(seed, 810 + side, rBX, rBZ) % (len - 2) ? 2 : 1;
+  const at = len < 3 ? a0 + (len === 2 ? hashU(seed, 810 + side, rBX, rBZ) % 2 : 0) : a0 + 1 + hashU(seed, 810 + side, rBX, rBZ) % (len - 2);
+  return (rSides >> side & 1) && along === at ? 2 : 1;
 }
 
 // Processions: in some PB x PB blocks, the same doorway repeated pN times, either
@@ -206,6 +214,7 @@ export function edgeSpan(seed, salt, line, along, out, o) {
 const BOW_U = U(0.3), BOW_MAX = 6;
 export let bowS = 0, bowE = 0, bowLean = false;
 export function bow(seed, salt, line, along) {
+  if (roomEdge(seed, salt, line, along) >= 0) return 0;     // room outlines stay straight
   let s = along, e = along + 1;
   while (s > along - BOW_MAX && lineKind(seed, salt, line, s - 1) === 1) s--;
   while (e < along + BOW_MAX && lineKind(seed, salt, line, e) === 1) e++;

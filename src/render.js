@@ -104,8 +104,8 @@ export function createRenderer(device, outFormat, seed) {
     vertex: { module: postMod, entryPoint: 'vs' }, fragment: { module: postMod, entryPoint: entry, targets: [{ format, blend }] } });
   const pPre = postPipe('fsPre', HDR), pDown = postPipe('fsDown', HDR), pUp = postPipe('fsUp', HDR, ADD), pFinal = postPipe('fsFinal', outFormat);
   const smp = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
-  const PU = new Float32Array(4);
-  const puBuf = device.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
+  const PU = new Float32Array(8);
+  const puBuf = device.createBuffer({ size: 32, usage: BU.UNIFORM | BU.COPY_DST });
 
   // ---- size-dependent targets and the pass list; rebuilt only on resize ----
   let W = 0, H = 0, textures = [];
@@ -153,13 +153,14 @@ export function createRenderer(device, outFormat, seed) {
   }
 
   const stats = { tris: 0, chunkX: 0, chunkZ: 0, level: 0 };
+  const look = { camcorder: false, exposure: 1, hall: 0 };   // set by the page: camcorder look, auto-exposure factor, hallway darkness 0..1
   // cam: { x, y, z, yaw, pitch, fov? (radians) }; out: the texture view to draw the final image into
   function render(out, cam, time) {
     matrices(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.fov || FOV);
-    UB[16] = cam.x; UB[17] = cam.y; UB[18] = cam.z; UB[19] = time; UB[20] = seed;
+    UB[16] = cam.x; UB[17] = cam.y; UB[18] = cam.z; UB[19] = time; UB[20] = seed; UB[21] = look.hall;
     UB[24] = curLV; UB[25] = levelSeed(seed, curLV - 1); UB[26] = levelSeed(seed, curLV); UB[27] = levelSeed(seed, curLV + 1);
     Q.writeBuffer(ubo, 0, UB);
-    PU[0] = time; PU[1] = EXPOSURE; PU[2] = BLOOM; PU[3] = GRAIN;
+    PU[0] = time; PU[1] = EXPOSURE; PU[2] = BLOOM; PU[3] = GRAIN; PU[4] = look.camcorder ? 1 : 0; PU[5] = look.exposure;
     Q.writeBuffer(puBuf, 0, PU);
 
     const enc = device.createCommandEncoder();
@@ -185,5 +186,5 @@ export function createRenderer(device, outFormat, seed) {
     stats.tris = verts / 3; stats.chunkX = curCX; stats.chunkZ = curCZ; stats.level = curLV;
   }
 
-  return { resize, stream, render, stats, get width() { return W; }, get height() { return H; } };
+  return { resize, stream, render, stats, look, get width() { return W; }, get height() { return H; } };
 }

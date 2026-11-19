@@ -15,13 +15,29 @@ export function createPhotos(canvas, onChange) {
   }
 
   // call right after the frame is drawn, in the same task, while the canvas still holds it
-  function take(seed, view, drone) {
+  // stamp: null, or two lines (date, time) burned into the corner like a camcorder's
+  let cv2 = null;
+  function take(seed, view, drone, stamp) {
     const n = ++count, name = 'backrooms-' + seed + '-' + String(n).padStart(3, '0') + '.jpg';
     const link = location.href.split(/[?#]/)[0] + '?seed=' + seed + '&x=' + view.x.toFixed(2) + '&z=' + view.z.toFixed(2) +
       '&y=' + view.y.toFixed(2) + '&yaw=' + (view.yaw * 180 / Math.PI).toFixed(1) + '&pitch=' + (view.pitch * 180 / Math.PI).toFixed(1) + (drone ? '&drone' : '');
     where.push(name + '  ' + link);
     pending++;
-    canvas.toBlob(async (blob) => {
+    let srcCanvas = canvas;
+    if (stamp) {                       // copy the frame into a 2D canvas and print the stamp on it
+      cv2 = cv2 || document.createElement('canvas');
+      cv2.width = canvas.width; cv2.height = canvas.height;
+      const g = cv2.getContext('2d'), u = canvas.height / 720;
+      g.drawImage(canvas, 0, 0);
+      g.font = `bold ${Math.round(30 * u)}px "Courier New", monospace`; g.textBaseline = 'alphabetic';
+      g.shadowColor = 'rgba(0,0,0,0.85)'; g.shadowOffsetX = g.shadowOffsetY = 2 * u; g.fillStyle = '#f4f1e0';
+      g.fillText('PLAY \u25B6', 46 * u, 70 * u);
+      g.textAlign = 'right';
+      g.fillText(stamp[1], canvas.width - 46 * u, canvas.height - 84 * u);
+      g.fillText(stamp[0], canvas.width - 46 * u, canvas.height - 46 * u);
+      srcCanvas = cv2;
+    }
+    srcCanvas.toBlob(async (blob) => {
       pending--;
       if (!blob) { onChange(); return; }
       if (dir) {

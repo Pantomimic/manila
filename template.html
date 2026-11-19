@@ -19,6 +19,10 @@
   #ph { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; font-size: 13px; }
   #ph button { padding: 5px 14px; background: transparent; color: #e9dfb8; border: 1px solid rgba(233, 223, 184, .5); }
   #ph button:disabled { opacity: .35; cursor: default; }
+  #vhs { position: fixed; inset: 0; pointer-events: none; font: bold 3.6vh "Courier New", monospace; color: #f4f1e0; text-shadow: .25vh .25vh 0 rgba(0,0,0,.85); }
+  #vhs.off { display: none; }
+  #vhs .play { position: absolute; left: 6.4vh; top: 5.6vh; }
+  #vhs .stamp { position: absolute; right: 6.4vh; bottom: 5.6vh; text-align: right; line-height: 1.2; }
   #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
   #err { color: #ffb4a0; max-width: 520px; }
 </style>
@@ -30,10 +34,11 @@
   <button id="go">Enter</button>
   <div id="vl"><label>Volume <input id="vol" type="range" min="0" max="100" value="50"></label><label>Mouse <input id="sens" type="range" min="0" max="100" value="50"></label></div>
   <small>WASD move &middot; mouse look &middot; Shift run &middot; C crouch &middot; right-click zoom &middot; M mute &middot; H stats &middot; Esc menu</small>
-  <small>F drone (Space up, C down) &middot; P photo &middot; O auto camera</small>
+  <small>F drone (Space up, C down) &middot; P photo &middot; O auto camera &middot; V camcorder look</small>
   <div id="ph"><span id="phn"></span><button id="phsave">Save all (.zip)</button><button id="phdir">Save straight to a folder</button></div>
   <small id="err"></small>
 </div>
+<div id="vhs" class="off"><div class="play">PLAY &#9654;</div><div class="stamp"><div id="vhstime"></div><div id="vhsdate"></div></div></div>
 <div id="flash"></div>
 <div id="hud"></div>
 <script>/*SCRIPT*/</script>

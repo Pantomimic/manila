@@ -1,8 +1,9 @@
 // The page: WebGPU setup, controls, movement and the frame loop. Drawing lives in render.js.
 // Rule carried over from abyssal-garden: no allocations inside frame() (no GC stutter).
-import { collide, cramped, findSpawn } from './gen.js';
+import { collide, cramped, findSpawn, roomCell, lightLevel, CELL } from './gen.js';
+import * as G from './gen.js';                // live room bounds after roomCell
 import { createRenderer } from './render.js';
-import { levelOf, levelSeed, groundAt, ceilAt, collideProps, FH } from './levels.js';
+import { levelOf, levelSeed, groundAt, ceilAt, collideProps, FH, liveLight } from './levels.js';
 import { createAudio } from './audio.js';
 import { createPhotos, AUTO_EVERY } from './photos.js';
 import { flyDrone } from './drone.js';
@@ -69,6 +70,19 @@ async function start() {
     }
     if (audio) audio.drone(drone ? 0 : -1);
   }
+  // camcorder look (V): VHS colour smear, wobble, tracking noise, a date stamp, slow auto exposure
+  const vhsEl = $('vhs'), vhsDate = $('vhsdate'), vhsTime = $('vhstime');
+  try { R.look.camcorder = localStorage.getItem('backrooms.vhs') === '1'; } catch {}
+  vhsEl.classList.toggle('off', !R.look.camcorder);
+  const MON = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  const tapeDay = (MON[seed % 12] + '. ' + (1 + (seed >> 4) % 28) + ' ' + (1993 + (seed >> 9) % 7));
+  const tapeStart = (seed >> 3) % (12 * 3600) + 3600;            // seconds past midnight when the tape starts
+  vhsDate.textContent = tapeDay;
+  const tapeClock = (t) => {
+    const s = Math.floor(tapeStart + t) % 86400, h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60;
+    return (h < 12 ? 'AM ' : 'PM ') + ((h + 11) % 12 + 1) + ':' + String(m).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  };
+  let expo = 1, stepN = 0, loops = -1, hallK = -99;
   const keys = new Set(), key = (c) => keys.has(c) ? 1 : 0;
   addEventListener('keydown', (e) => {
     keys.add(e.code);
@@ -78,6 +92,7 @@ async function start() {
     if (e.code === 'KeyF') toggleDrone();
     if (e.code === 'KeyP') shoot = true;
     if (e.code === 'KeyO') { autoCam = !autoCam; autoT = 0; }
+    if (e.code === 'KeyV') { R.look.camcorder = !R.look.camcorder; vhsEl.classList.toggle('off', !R.look.camcorder); try { localStorage.setItem('backrooms.vhs', R.look.camcorder ? '1' : ''); } catch {} }
     if (e.code === 'Space') e.preventDefault();
   });
   addEventListener('keyup', (e) => keys.delete(e.code));
@@ -154,6 +169,14 @@ async function start() {
           if (g - py > STEP || Math.max(g, py) + tall > ceilAt(seed, levelOf(Math.max(g, py)), pos[0], pos[1])) { pos[0] = ox; pos[1] = oz; }
         }
         bob += sp * dt * 2.2;
+        // footsteps: one each half bob cycle, on carpet, soaked carpet or pool tile
+        const n = Math.floor(bob / Math.PI);
+        if (n !== stepN && grounded) {
+          stepN = n;
+          const rm = roomCell(sB, Math.floor(pos[0] / CELL), Math.floor(pos[1] / CELL));
+          if (audio) audio.step(rm === 7 ? 1 : rm === 9 ? 2 : 0, crouched ? 0.2 : sp > WALK ? 1 : 0.5);
+        }
+        hallway(sB);
       }
     }
     const ease = 1 - Math.exp(-dt * 12);
@@ -176,26 +199,62 @@ async function start() {
     }
     const feet = drone ? levelOf(dr.y) * FH : py;
     R.stream(cam.x, feet, cam.z, false);
+    // auto exposure (camcorder only): opens up slowly in the dark, clamps down in bright rooms
+    if (R.look.camcorder) {
+      const lvE = levelOf(feet + 1.0), sE = levelSeed(seed, lvE), ccx = Math.floor(cam.x / CELL), ccz = Math.floor(cam.z / CELL);
+      let est = 0;
+      for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
+        const X = ccx + dx, Z = ccz + dz, k = liveLight(seed, lvE, X, Z, ccx, ccz);
+        if (!k) continue;
+        const ex = (X + 0.5) * CELL - cam.x, ez = (Z + 0.5) * CELL - cam.z;
+        est += lightLevel(sE, X, Z, k, now / 1000) / (1 + (ex * ex + ez * ez) / 8);
+      }
+      const target = Math.min(3.2, Math.max(0.75, 1.6 / (0.35 + est)));
+      expo += (target - expo) * (1 - Math.exp(-dt * 0.8));
+    } else expo = 1;
+    R.look.exposure = expo;
+    { // the hallway's darkness comes on over a second or two once you're in it
+      const lvC = levelOf(cam.y - 1.0), inHall = roomCell(levelSeed(seed, lvC), Math.floor(cam.x / CELL), Math.floor(cam.z / CELL)) === 10;
+      R.look.hall += ((inHall ? 1 : 0) - R.look.hall) * (1 - Math.exp(-dt * 1.2));
+    }
     R.render(ctx.getCurrentTexture().createView(), cam, now / 1000);
     // photos: read the canvas now, in the same task as the draw, before it is shown
     if (autoCam && locked && (autoT += dt) >= AUTO_EVERY) { autoT = 0; shoot = true; }
     if (shoot) {
-      shoot = false; photos.take(seed, cam, drone); flashT = 1;
+      shoot = false; photos.take(seed, cam, drone, R.look.camcorder ? [tapeDay, tapeClock(now / 1000)] : null); flashT = 1;
       if (audio) audio.shutter();
     }
     if (flashT > 0) { flashT = Math.max(0, flashT - dt * 5); flash.style.opacity = (flashT * 0.5).toFixed(3); }
     // (a bug in the sound must never stop the frame: the HUD below silently froze once)
     if (audio) try {
+      audio.listen(cam.x, cam.y, cam.z, cam.yaw);
       audio.update(seed, levelOf(drone ? dr.y : py + 1.0), cam.x, cam.z, now / 1000);
       if (drone) audio.drone(Math.hypot(dv[0], dv[1], dv[2]));
     } catch (e) { console.error(e); audio = null; }
 
     fpsT += dt; fpsN++; if (fpsT >= 0.5) {
+      if (R.look.camcorder) vhsTime.textContent = tapeClock(now / 1000);
       const st = R.stats;
       hud.textContent = 'seed ' + seed + (drone ? '  ·  drone' : '') + (autoCam ? '  ·  auto camera' : '') + (photos.count ? '  ·  ' + photos.count + ' photos' : '') + (stats ? '\n' + (fpsN / fpsT).toFixed(0) + ' fps  ' + w + 'x' + h + '  ' + st.tris + ' tris  chunk ' + st.chunkX + ',' + st.chunkZ + '  level ' + st.level : '');
       fpsT = 0; fpsN = 0;
     }
   }
+  // The hallway room loops: walking along it, a few times you are put back three cells without
+  // noticing (the hallway is built to look the same all along), then it lets you through.
+  function hallway(sB) {
+    const cx = Math.floor(pos[0] / CELL), cz = Math.floor(pos[1] / CELL);
+    if (roomCell(sB, cx, cz) !== 10) { loops = -1; hallK = -99; return; }
+    const alongX = G.rX1 - G.rX0 > 1, n = alongX ? G.rX1 - G.rX0 : G.rZ1 - G.rZ0, k = (alongX ? cx - G.rX0 : cz - G.rZ0);
+    if (loops < 0) loops = 2 + (Math.floor(Math.random() * 4));
+    if (loops > 0 && hallK !== -99) {
+      let shift = 0;
+      if (k === n - 4 && hallK === n - 5) shift = -3;    // (the shader fogs the hallway past ~7 m, so the
+      else if (k === 3 && hallK === 4) shift = 3;        //  ends are never in view when this happens)
+      if (shift) { pos[alongX ? 0 : 1] += shift * CELL; loops--; hallK = k + shift; return; }
+    }
+    hallK = k;
+  }
+
   R.stream(cam.x, drone ? levelOf(dr.y) * FH : py, cam.z, true);   // whole start area before the first frame
   requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
 }
