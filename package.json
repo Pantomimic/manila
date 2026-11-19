@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "build:readable": "node build.mjs --readable"
+    "build:readable": "node build.mjs --readable",
+    "dist": "node build.mjs --dist",
+    "itch": "node build.mjs --dist && butler push dist/itch pantomimic/manila:html --userversion-file dist/version.txt"
   },
   "devDependencies": {
     "esbuild": "0.25.0"

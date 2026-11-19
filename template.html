@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Backrooms</title>
+<title>Manila</title>
 <style>
   html, body { margin: 0; height: 100%; background: #0d0b06; overflow: hidden; font: 14px/1.4 system-ui, sans-serif; color: #e9dfb8; }
   canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
@@ -24,19 +24,26 @@
   #vhs .play { position: absolute; left: 6.4vh; top: 5.6vh; }
   #vhs .stamp { position: absolute; right: 6.4vh; bottom: 5.6vh; text-align: right; line-height: 1.2; }
   #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+  #sd { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; font-size: 13px; }
+  #sd input { font: inherit; background: rgba(0,0,0,.35); color: #e9dfb8; border: 1px solid rgba(233, 223, 184, .4); border-radius: 3px; padding: 4px 8px; }
+  #sd button { padding: 5px 12px; background: transparent; color: #e9dfb8; border: 1px solid rgba(233, 223, 184, .5); }
+  #ver { opacity: .4; font-size: 11px; }
   #err { color: #ffb4a0; max-width: 520px; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="menu">
-  <h1>Backrooms</h1>
+  <h1>Manila</h1>
   <button id="go">Enter</button>
   <div id="vl"><label>Volume <input id="vol" type="range" min="0" max="100" value="50"></label><label>Mouse <input id="sens" type="range" min="0" max="100" value="50"></label></div>
   <small>WASD move &middot; mouse look &middot; Shift run &middot; C crouch &middot; right-click zoom &middot; M mute &middot; H stats &middot; Esc menu</small>
   <small>F drone (Space up, C down) &middot; P photo &middot; O auto camera &middot; V camcorder look</small>
   <div id="ph"><span id="phn"></span><button id="phsave">Save all (.zip)</button><button id="phdir">Save straight to a folder</button></div>
+  <div id="sd"><label>Seed <input id="seedin" inputmode="numeric" size="9"></label><button id="seedgo">Go</button><button id="seednew">New random</button>
+    <input id="goto" placeholder="Paste a line from where.txt to go there" size="34"></div>
   <small id="err"></small>
+  <small id="ver"></small>
 </div>
 <div id="vhs" class="off"><div class="play">PLAY &#9654;</div><div class="stamp"><div id="vhstime"></div><div id="vhsdate"></div></div></div>
 <div id="flash"></div>

@@ -60,7 +60,21 @@ async function start() {
   showPhotos();
   $('phsave').onclick = () => photos.saveZip(seed).catch((e) => showError(e.message));
   $('phdir').onclick = () => photos.pickFolder().catch((e) => { if (e.name !== 'AbortError') showError(e.message); });
-  if (!window.showDirectoryPicker) $('phdir').style.display = 'none';
+  // inside a cross-origin frame (itch.io's player) browsers refuse folder pickers
+  let framed = true; try { framed = window.top !== window.self; } catch {}
+  if (!window.showDirectoryPicker || framed) $('phdir').style.display = 'none';
+  // seed and "go to a photo's spot": inside a frame nobody can see or edit the address bar
+  const seedIn = $('seedin'); seedIn.value = seed;
+  const goQuery = (q) => { location.search = q; };
+  $('seedgo').onclick = () => { const n = parseInt(seedIn.value, 10); if (n > 0 && n < 16777216) goQuery('?seed=' + n); else seedIn.value = seed; };
+  seedIn.onkeydown = (e) => { if (e.key === 'Enter') $('seedgo').onclick(); };
+  $('seednew').onclick = () => goQuery('?seed=' + (1 + Math.floor(Math.random() * 16777214)));
+  $('goto').onkeydown = (e) => {
+    if (e.key !== 'Enter') return;
+    const t = e.target.value, q = t.slice(t.indexOf('?') + 1).trim();
+    if (t.includes('?') && /(^|&)seed=\d+/.test(q) && /(^|&)x=/.test(q)) goQuery('?' + q); else e.target.value = '';
+  };
+  $('ver').textContent = 'build ' + __VERSION__;
   function toggleDrone() {
     if (!drone) { drone = true; dr.y = cam.y; dv.fill(0); }
     else {                                              // drop to the floor from where the drone is
@@ -85,6 +99,7 @@ async function start() {
   let expo = 1, stepN = 0, loops = -1, hallK = -99;
   const keys = new Set(), key = (c) => keys.has(c) ? 1 : 0;
   addEventListener('keydown', (e) => {
+    if (e.target instanceof HTMLInputElement) return;          // typing a seed is not playing
     keys.add(e.code);
     if (e.code === 'KeyH') stats = !stats;
     if (e.code === 'KeyM' && audio) audio.toggleMute();

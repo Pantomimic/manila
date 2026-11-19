@@ -18,7 +18,7 @@ export function createPhotos(canvas, onChange) {
   // stamp: null, or two lines (date, time) burned into the corner like a camcorder's
   let cv2 = null;
   function take(seed, view, drone, stamp) {
-    const n = ++count, name = 'backrooms-' + seed + '-' + String(n).padStart(3, '0') + '.jpg';
+    const n = ++count, name = 'manila-' + seed + '-' + String(n).padStart(3, '0') + '.jpg';
     const link = location.href.split(/[?#]/)[0] + '?seed=' + seed + '&x=' + view.x.toFixed(2) + '&z=' + view.z.toFixed(2) +
       '&y=' + view.y.toFixed(2) + '&yaw=' + (view.yaw * 180 / Math.PI).toFixed(1) + '&pitch=' + (view.pitch * 180 / Math.PI).toFixed(1) + (drone ? '&drone' : '');
     where.push(name + '  ' + link);
@@ -65,7 +65,7 @@ export function createPhotos(canvas, onChange) {
     files.push({ name: 'where.txt', data: new TextEncoder().encode(where.join('\n') + '\n') });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(zip(files));
-    a.download = 'backrooms-' + seed + '-photos.zip';
+    a.download = 'manila-' + seed + '-photos.zip';
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     shots.length = 0;
