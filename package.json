@@ -1,6 +1,7 @@
 {
   "name": "manila",
   "private": true,
+  "license": "MIT",
   "description": "Endless procedural backrooms, rendered with WebGPU, bundled into one HTML file",
   "type": "module",
   "scripts": {

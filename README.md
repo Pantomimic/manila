@@ -38,7 +38,7 @@ There is nothing to fight. There is a lot to find.
 | ![A room lit red, with cables hanging from missing ceiling tiles](docs/shots/red.jpg) | ![A red exit sign over a doorway in a dark room](docs/shots/exit.jpg) |
 | ![Rows of stacking chairs filling an empty hall](docs/shots/chairs.jpg) | ![A staircase climbing to the floor above](docs/shots/stairs.jpg) |
 
-![The office seen through the camcorder look, with colour smear and tape noise](docs/shots/camcorder.jpg)
+![A flooded office floor reflecting the ceiling lights, seen through the camcorder look with colour smear and tape noise](docs/shots/camcorder.jpg)
 
 ## Controls
 
@@ -107,4 +107,4 @@ Open `index.html` in a WebGPU browser. Add `?seed=1234` to the URL to pick a bui
 
 ---
 
-Made by Pantomimic Software.
+Made by Pantomimic Software. Released under the [MIT License](LICENSE).
