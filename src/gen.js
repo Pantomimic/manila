@@ -262,7 +262,7 @@ export const hangDir = (seed, x, z) => (hashU(seed, 311, x, z) & 1) ? 1 : -1;
 // two halves meet flush (no z-fighting).
 export const CHUNK = 8;
 export const MAX_HANG = 4;                              // hanging panels built per chunk (they're rare)
-export const MAX_VERTS = 24000;   // walls ~5000 at worst, plus props and furnished rooms; writers stop at the limit
+export const MAX_VERTS = 30000;   // walls ~5000 at worst, plus props and furnished rooms; writers stop at the limit
 const FLOATS = 7;                                       // [px, py, pz, nx, ny, nz, material]
 
 // Writes the chunk's triangles into out (a Float32Array of at least MAX_VERTS * 7) and returns the

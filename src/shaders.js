@@ -205,7 +205,11 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
   else if (i.m < 9.5) { albedo = vec3f(0.62, 0.55, 0.44); }   // desk laminate
   else if (i.m < 10.5) { albedo = vec3f(0.12, 0.13, 0.16); }  // chair fabric
   else if (i.m < 11.5) { albedo = vec3f(0.40, 0.38, 0.33) * (0.9 + 0.2 * vnoise(i.wp.xz * 4.0 + i.wp.y * 3.0)); }   // concrete
-  else { albedo = vec3f(0.30, 0.33, 0.38) * (0.92 + 0.16 * vnoise(i.wp.xz * 9.0 + i.wp.y * 9.0)); }   // partition fabric
+  else if (i.m < 12.5) { albedo = vec3f(0.30, 0.33, 0.38) * (0.92 + 0.16 * vnoise(i.wp.xz * 9.0 + i.wp.y * 9.0)); }   // partition fabric
+  else if (i.m < 13.5) { albedo = vec3f(0.02, 0.025, 0.024); }  // CRT glass
+  else if (i.m < 14.5) { albedo = vec3f(0.035, 0.035, 0.038); } // black plastic
+  else if (i.m < 15.5) { albedo = vec3f(0.54, 0.47, 0.37); }    // drawer fronts
+  else { albedo = vec3f(0.66, 0.62, 0.52) * (0.96 + 0.08 * vnoise(i.wp.xz * 20.0 + i.wp.y * 20.0)); }   // old beige plastic
 
   let f = vec2i(floor(i.wp.xz / CELL));
   let room = cellRoom(f);
@@ -304,6 +308,18 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
     col = select(vec3f(0.16, 0.16, 0.15) * (light + 0.05), vec3f(1.0, 0.98, 0.88) * 6.0 * level, level > 0.05);
   }
 
+  // CRT glass: a sheen of the room on it, and now and then one left on, glowing with scanlines
+  if (i.m > 12.5 && i.m < 13.5) {
+    let fr = pow(1.0 - clamp(dot(n, vd), 0.0, 1.0), 3.0);
+    col += vec3f(0.5, 0.5, 0.45) * light * (0.06 + 0.5 * fr);
+    if (hc(321u, f) % 9u == 0u) {                    // (per cell: one desk a cell)
+      let t = u.cam.w;
+      let lines = 0.75 + 0.25 * sin(i.wp.y * 1500.0);
+      let roll = 0.85 + 0.15 * smoothstep(0.0, 0.08, fract(i.wp.y * 3.0 - t * 0.35));
+      let fl = 0.92 + 0.08 * sin(t * 61.0 + f32(hc(322u, f) % 100u));
+      col += vec3f(0.30, 0.42, 0.52) * 1.6 * lines * roll * fl;
+    }
+  }
   let dist = length(vin.wp - u.cam.xyz);
   col = mix(col, vec3f(0.045, 0.038, 0.02), 1.0 - exp(-dist * 0.03));
   return vec4f(col, 1.0);

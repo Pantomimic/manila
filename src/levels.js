@@ -179,7 +179,7 @@ function pushCircle(pos, r, x, z, cr) {
 }
 // props and special-room furniture push you out (circles; allocation free, runs every frame)
 let cPos = null, cR = 0, cH = 0;
-const ITEM_TOP = [1.25, 1.0, HEIGHT, 2.1, 1.5];   // how tall each item stands (the drone flies over the low ones)
+const ITEM_TOP = [1.25, 1.15, HEIGHT, 2.1, 1.5, 0.95];   // how tall each item stands (the drone flies over the low ones)
 const solidOf = (type, px, py, pz, yaw, pitch, roll, sr, len) => {
   if (sr <= 0 || cH > ITEM_TOP[type] + py) return;
   if (type === ITEM_PART) {                       // thin wall: push out of its box
@@ -214,7 +214,7 @@ export function collideProps(seed, lv, pos, r, hy = 0) {
 // furnish() calls emit(type, x, y, z, yaw, pitch, roll, solidRadius) for each item in cell (x, z):
 // x, z in metres, y = offset from the floor (negative: sunk into it). Used for both the geometry and
 // collision, so they always agree. Further out, more items come out wrong.
-export const ITEM_DESK = 0, ITEM_CHAIR = 1, ITEM_PILLAR = 2, ITEM_FRAME = 3, ITEM_PART = 4;   // PART: extra arg = half length
+export const ITEM_DESK = 0, ITEM_CHAIR = 1, ITEM_PILLAR = 2, ITEM_FRAME = 3, ITEM_PART = 4, ITEM_SEAT = 5;   // PART: extra arg = half length; SEAT: stacking chair
 const PI = Math.PI;
 const isWrong = (sL, k, x, z, f) => hashU(sL, 830 + k, x, z) < U(0.03 + 0.35 * f);
 const rnd = (sL, k, x, z) => unit(hashU(sL, 860 + k, x, z));
@@ -246,16 +246,16 @@ export function furnish(seed, lv, x, z, emit) {
     for (let k = 0; k < 4; k++) {
       const px = mx + ((k & 1) ? 0.72 : -0.72), pz = mz + ((k & 2) ? 0.72 : -0.72);
       const w = isWrong(sL, k, x, z, f) ? hashU(sL, 850 + k, x, z) % 4 : -1;
-      if (w === 0) emit(ITEM_CHAIR, px, 0, pz, yaw0 + PI, 0, 0, 0.3);              // turned round
-      else if (w === 1) emit(ITEM_CHAIR, px, 0.24, pz, yaw0 + 0.6, 0, PI / 2, 0.3);   // on its side
-      else if (w === 2) emit(ITEM_CHAIR, px, HEIGHT, pz, yaw0, 0, PI, 0);           // on the ceiling
-      else emit(ITEM_CHAIR, px, w === 3 ? -0.38 : 0, pz, yaw0, 0, 0, 0.3);         // (3: sunk to the seat)
+      if (w === 0) emit(ITEM_SEAT, px, 0, pz, yaw0 + PI, 0, 0, 0.3);              // turned round
+      else if (w === 1) emit(ITEM_SEAT, px, 0.24, pz, yaw0 + 0.6, 0, PI / 2, 0.3);   // on its side
+      else if (w === 2) emit(ITEM_SEAT, px, HEIGHT, pz, yaw0, 0, PI, 0);           // on the ceiling
+      else emit(ITEM_SEAT, px, w === 3 ? -0.38 : 0, pz, yaw0, 0, 0, 0.3);         // (3: sunk to the seat)
     }
     return;
   }
   if (t === 4) {                                    // dark room: one chair under the one light
     if (x !== (x0 + x1 - 1) >> 1 || z !== (z0 + z1 - 1) >> 1) return;
-    emit(ITEM_CHAIR, mx, 0, mz, rnd(sL, 0, x, z) * 2 * PI, 0, 0, 0.35);
+    emit(ITEM_SEAT, mx, 0, mz, rnd(sL, 0, x, z) * 2 * PI, 0, 0, 0.35);
     return;
   }
   if (t === 8) {                                    // cubicles: partitions on the inner edges, a gap at one end
@@ -296,13 +296,24 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   const V = (x, y, z, nx, ny, nz, m) => { if (n + FLOATS > out.length) return; out[n] = x; out[n + 1] = y; out[n + 2] = z; out[n + 3] = nx; out[n + 4] = ny; out[n + 5] = nz; out[n + 6] = m; n += FLOATS; };
   const Q = (a, b, c, d, nx, ny, nz, m) => { V(...a, nx, ny, nz, m); V(...b, nx, ny, nz, m); V(...c, nx, ny, nz, m); V(...a, nx, ny, nz, m); V(...c, nx, ny, nz, m); V(...d, nx, ny, nz, m); };
   // oriented box: centre c, half sizes h, rotation R (3x3, columns = local axes), material m
-  const OB = (c, h, R, m) => {
+  // skip: faces to leave out, bit (2 * axis + (negative side ? 1 : 0)); 8 = the bottom (never seen on the floor)
+  const OB = (c, h, R, m, skip = 0) => {
     const P = (sx, sy, sz) => [c[0] + R[0] * sx * h[0] + R[3] * sy * h[1] + R[6] * sz * h[2], c[1] + R[1] * sx * h[0] + R[4] * sy * h[1] + R[7] * sz * h[2], c[2] + R[2] * sx * h[0] + R[5] * sy * h[1] + R[8] * sz * h[2]];
     const face = (ax, s, m2) => {             // the face whose normal is local axis ax * s
       const u = (ax + 1) % 3, v = (ax + 2) % 3, pt = (a, b) => { const q = [0, 0, 0]; q[ax] = s; q[u] = a; q[v] = b; return P(q[0], q[1], q[2]); };
       Q(pt(-1, -1), pt(1, -1), pt(1, 1), pt(-1, 1), R[ax * 3] * s, R[ax * 3 + 1] * s, R[ax * 3 + 2] * s, m2);
     };
-    for (let ax = 0; ax < 3; ax++) { face(ax, 1, m); face(ax, -1, m); }
+    for (let ax = 0; ax < 3; ax++) { if (!(skip & (1 << ax * 2))) face(ax, 1, m); if (!(skip & (2 << ax * 2))) face(ax, -1, m); }
+  };
+  // R turned by a about its own x axis (positive: the top leans back toward -z)
+  const tiltX = (R, a) => {
+    const c = Math.cos(a), sn = Math.sin(a);
+    return [R[0], R[1], R[2], R[3] * c - R[6] * sn, R[4] * c - R[7] * sn, R[5] * c - R[8] * sn, R[6] * c + R[3] * sn, R[7] * c + R[4] * sn, R[8] * c + R[5] * sn];
+  };
+  // R turned by a about its own y axis
+  const turnY = (R, a) => {
+    const c = Math.cos(a), sn = Math.sin(a);
+    return [R[0] * c + R[6] * sn, R[1] * c + R[7] * sn, R[2] * c + R[8] * sn, R[3], R[4], R[5], R[6] * c - R[0] * sn, R[7] * c - R[1] * sn, R[8] * c - R[2] * sn];
   };
   // rotation from yaw (about y), then pitch (about local x), then roll (about local z)
   const rot = (yaw, pitch = 0, roll = 0) => {
@@ -314,12 +325,50 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   };
   const loc = (R, o, l) => [o[0] + R[0] * l[0] + R[3] * l[1] + R[6] * l[2], o[1] + R[1] * l[0] + R[4] * l[1] + R[7] * l[2], o[2] + R[2] * l[0] + R[5] * l[1] + R[8] * l[2]];
 
-  // simpler furniture for the furnished rooms (fewer boxes: there are a lot of them)
-  const chairLite = (o, R) => {
-    OB(loc(R, o, [0, 0.45, 0]), [0.24, 0.04, 0.24], R, 10);
-    OB(loc(R, o, [0, 0.74, -0.22]), [0.22, 0.25, 0.03], R, 10);
-    OB(loc(R, o, [0, 0.22, 0]), [0.03, 0.22, 0.03], R, 6);
-    OB(loc(R, o, [0, 0.015, 0]), [0.22, 0.015, 0.22], R, 6);
+  // ---- furniture. Origins at the floor centre; a seat faces +z, a desk's user side is +z.
+  // Materials: 6 metal, 9 laminate, 10 fabric, 13 screen, 14 black plastic, 15 drawer fronts, 16 beige plastic
+  const B8 = 8;                                // leave out bottom faces
+  // office chair: five-star base, gas column, seat, reclined back on a spine, armrests
+  const officeChair = (o, R, legs = 0.45, back = 0.3, arms = true) => {
+    for (let k = 0; k < 5; k++) { const a = k * 1.2566 + 0.3, Rk = turnY(R, a); OB(loc(R, o, [Math.cos(a) * 0.15, 0.05, -Math.sin(a) * 0.15]), [0.15, 0.018, 0.022], Rk, 14, B8); }
+    OB(loc(R, o, [0, 0.09, 0]), [0.035, 0.035, 0.035], R, 14, B8);
+    OB(loc(R, o, [0, (legs + 0.12) / 2, 0]), [0.022, (legs - 0.12) / 2, 0.022], R, 6, B8 | 4);
+    OB(loc(R, o, [0, legs - 0.03, 0]), [0.11, 0.025, 0.11], R, 14);
+    OB(loc(R, o, [0, legs + 0.035, 0.01]), [0.25, 0.04, 0.24], R, 10);
+    OB(loc(R, o, [0, legs + 0.12, -0.26]), [0.035, 0.12, 0.014], R, 14);
+    const Rb = tiltX(R, 0.14);
+    OB(loc(R, o, [0, legs + 0.2 + back, -0.27 - 0.14 * (0.1 + back)]), [0.23, back, 0.035], Rb, 10);
+    if (arms) for (const sx of [-0.27, 0.27]) {
+      OB(loc(R, o, [sx, legs + 0.13, -0.02]), [0.014, 0.1, 0.022], R, 14, B8);
+      OB(loc(R, o, [sx, legs + 0.24, 0]), [0.03, 0.014, 0.11], R, 14);
+    }
+  };
+  // stacking chair, the kind set out in rows: four thin legs, the back legs rise into the backrest
+  const stackChair = (o, R) => {
+    OB(loc(R, o, [0, 0.45, 0]), [0.22, 0.03, 0.21], R, 10);
+    for (const sx of [-0.19, 0.19]) {
+      OB(loc(R, o, [sx, 0.21, 0.17]), [0.012, 0.21, 0.012], R, 6, B8 | 4);
+      OB(loc(R, o, [sx, 0.45, -0.2]), [0.012, 0.45, 0.012], tiltX(R, 0.06), 6, B8);
+    }
+    OB(loc(R, o, [0, 0.79, -0.235]), [0.21, 0.12, 0.02], tiltX(R, 0.06), 10);
+  };
+  // office desk: drawer pedestal on the right, side panel on the left, modesty panel,
+  // a beige CRT on a stand and a keyboard
+  const desk = (o, R) => {
+    OB(loc(R, o, [0, 0.74, 0]), [0.7, 0.018, 0.36], R, 9);
+    OB(loc(R, o, [0.48, 0.36, 0]), [0.2, 0.36, 0.33], R, 9, B8 | 4);
+    for (let k = 0; k < 3; k++) {
+      const y = 0.6 - k * 0.23;
+      OB(loc(R, o, [0.48, y, 0.335]), [0.185, 0.1, 0.006], R, 15, 32);
+      OB(loc(R, o, [0.48, y + 0.06, 0.345]), [0.05, 0.008, 0.008], R, 6, 32);
+    }
+    OB(loc(R, o, [-0.67, 0.36, 0]), [0.02, 0.36, 0.33], R, 9, B8 | 4);
+    OB(loc(R, o, [-0.19, 0.45, -0.31]), [0.46, 0.25, 0.01], R, 9);
+    OB(loc(R, o, [0, 0.775, -0.14]), [0.11, 0.017, 0.11], R, 16, B8);
+    OB(loc(R, o, [0, 0.96, -0.24]), [0.15, 0.13, 0.13], R, 16, B8);
+    OB(loc(R, o, [0, 0.965, -0.075]), [0.2, 0.175, 0.04], R, 16);
+    OB(loc(R, o, [0, 0.975, -0.033]), [0.16, 0.13, 0.004], R, 13, 32);
+    OB(loc(R, o, [0, 0.77, 0.17]), [0.22, 0.012, 0.075], tiltX(R, -0.05), 16, B8);
   };
   // a door frame sunk s metres into the floor, cut off at floor level (so it can't poke out of the
   // ceiling of the level below)
@@ -334,18 +383,15 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   const build = (type, px, py, pz, yaw, pitch, roll, sr, len) => {
     const R = rot(yaw, pitch, roll), o = [px, y0 + py, pz];
     if (type === ITEM_PART) {                    // partition 1.5 m tall, cut off at the floor if sunk
-      const top = 1.5 + py; if (top > 0.02) OB([px, y0 + top / 2, pz], [len, top / 2, 0.035], R, 12);
-    } else if (type === ITEM_CHAIR) chairLite(o, R);
+      const top = 1.5 + py; if (top <= 0.02) return;
+      OB([px, y0 + top / 2, pz], [len, top / 2, 0.035], R, 12, B8);
+      OB([px, y0 + top + 0.012, pz], [len, 0.012, 0.042], R, 6);                 // aluminium cap rail
+      if (py >= 0) OB([px, y0 + 0.05, pz], [len - 0.01, 0.05, 0.04], R, 14, B8); // kick strip
+    } else if (type === ITEM_CHAIR) officeChair(o, R);
+    else if (type === ITEM_SEAT) stackChair(o, R);
     else if (type === ITEM_FRAME) { o[1] = y0; frame(o, R, -py); }
     else if (type === ITEM_PILLAR) OB([px, y0 + (py + HEIGHT) / 2, pz], [0.25, (HEIGHT - py) / 2, 0.25], R, 2);
-    else {                                         // desk with side panels, modesty panel and a monitor
-      OB(loc(R, o, [0, 0.74, 0]), [0.7, 0.02, 0.35], R, 9);
-      OB(loc(R, o, [-0.67, 0.36, 0]), [0.02, 0.36, 0.33], R, 9);
-      OB(loc(R, o, [0.67, 0.36, 0]), [0.02, 0.36, 0.33], R, 9);
-      OB(loc(R, o, [0, 0.45, -0.31]), [0.65, 0.25, 0.01], R, 9);
-      OB(loc(R, o, [0, 1.0, -0.18]), [0.24, 0.16, 0.02], R, 10);
-      OB(loc(R, o, [0, 0.82, -0.2]), [0.03, 0.07, 0.03], R, 6);
-    }
+    else desk(o, R);
   };
   const st = new Float64Array(6), r = new Float64Array(4), p = new Float64Array(4);
   const x0 = cx * CHUNK, z0 = cz * CHUNK, MAX_BUNDLES = 8;
@@ -407,21 +453,6 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     const t = p[0];
     if (t < 0) continue;
     const yaw = p[1];
-    const desk = (o, R) => {                   // 1.4 x 0.7 office desk, origin at the floor centre
-      OB(loc(R, o, [0, 0.74, 0]), [0.7, 0.02, 0.35], R, 9);
-      for (const [lx, lz] of [[-0.66, -0.31], [0.66, -0.31], [-0.66, 0.31], [0.66, 0.31]]) OB(loc(R, o, [lx, 0.36, lz]), [0.025, 0.36, 0.025], R, 6);
-      OB(loc(R, o, [0, 0.45, -0.3]), [0.62, 0.25, 0.01], R, 9);
-    };
-    const chair = (o, R, legs = 0.45, back = 0.45) => {
-      OB(loc(R, o, [0, legs, 0]), [0.24, 0.04, 0.24], R, 10);
-      OB(loc(R, o, [0, legs + 0.04 + back, -0.22]), [0.22, back, 0.03], R, 10);
-      OB(loc(R, o, [0, legs / 2, 0]), [0.025, legs / 2, 0.025], R, 6);
-      for (let k = 0; k < 5; k++) {          // five-star base: each leg's axes are R turned by a about local y
-        const a = k * 1.2566, c = Math.cos(a), sn = Math.sin(a);
-        const Rk = [R[0] * c + R[6] * sn, R[1] * c + R[7] * sn, R[2] * c + R[8] * sn, R[3], R[4], R[5], R[6] * c - R[0] * sn, R[7] * c - R[1] * sn, R[8] * c - R[2] * sn];
-        OB(loc(R, o, [c * 0.15, 0.04, sn * 0.15]), [0.15, 0.015, 0.02], Rk, 6);
-      }
-    };
     if (t === 0) {                             // stop sign, stuck in the floor at a lean, facing the wrong way
       const R = rot(yaw, (p[2] - 0.5) * 0.7, (p[3] - 0.5) * 0.5), o = [mx, y0 - 0.35, mz];
       OB(loc(R, o, [0, 1.1, 0]), [0.03, 1.1, 0.03], R, 6);
@@ -444,9 +475,18 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
       const s = p[1], along = (p[2] - 0.5) * 1.2;
       const o = s < 2 ? [mx + along, y0, (s === 0 ? z : z + 1) * CELL] : [(s === 2 ? x : x + 1) * CELL, y0, mz + along];
       desk(o, rot(s < 2 ? 0.3 * (p[3] - 0.5) : Math.PI / 2 + 0.3 * (p[3] - 0.5)));
-    } else if (t === 3) chair([mx, y0, mz], rot(yaw), 0.45 + 0.9 * p[2], 0.45 + 0.8 * p[3]);
-    else if (t === 4) chair([mx, y0 + HEIGHT, mz], rot(yaw, 0, Math.PI));
-    else if (t === 5) OB([mx, y0 + 0.4, mz], [0.24, 0.7, 0.32], rot(yaw, 0.25 + 0.3 * p[2], (p[3] - 0.5) * 0.4), 6);
+    } else if (t === 3) officeChair([mx, y0, mz], rot(yaw), 0.45 + 0.9 * p[2], 0.3 + 0.6 * p[3]);
+    else if (t === 4) officeChair([mx, y0 + HEIGHT, mz], rot(yaw, 0, Math.PI));
+    else if (t === 5) {                        // four-drawer filing cabinet tilted into the floor
+      const R = rot(yaw, 0.25 + 0.3 * p[2], (p[3] - 0.5) * 0.4), o = [mx, y0 + 0.4, mz];
+      OB(o, [0.24, 0.7, 0.32], R, 6);
+      for (let k = 0; k < 4; k++) {
+        const y = 0.7 - 0.175 - k * 0.35;
+        OB(loc(R, o, [0, y, 0.325]), [0.215, 0.155, 0.006], R, 6, 32);
+        OB(loc(R, o, [0, y + 0.07, 0.338]), [0.06, 0.012, 0.008], R, 14, 32);
+        OB(loc(R, o, [0, y + 0.115, 0.333]), [0.035, 0.018, 0.003], R, 8, 32);      // label card
+      }
+    }
     else if (t === 6) {                        // a door frame standing in the middle of the room
       const R = rot(yaw), o = [mx, y0, mz];
       OB(loc(R, o, [-0.62, HEIGHT / 2, 0]), [0.17, HEIGHT / 2, THICK], R, 2);
