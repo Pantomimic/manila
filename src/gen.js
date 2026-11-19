@@ -30,6 +30,69 @@ export const SALT_H = 101, SALT_V = 202;
 const unit = (h) => (h >>> 8) / 16777216;
 export const wallLike = (k) => k === 1 || k === 3;
 
+// ---- mutation: 0 near the start, +1 every MUT_STEP cells (120 m) out, levels count as MUT_LEVEL
+// cells each. Integer maths only (the shader has an exact copy). It lives here because the walls,
+// doors and lights get stranger with it too.
+export const MUT_STEP = 40, MUT_LEVEL = 25;
+export function mutation(lv, x, z) {
+  if (Math.abs(x) > 2000 || Math.abs(z) > 2000 || Math.abs(lv) > 60) return 8;
+  const d2 = x * x + z * z + lv * MUT_LEVEL * lv * MUT_LEVEL;
+  let k = 0; while (k < 8 && d2 >= ((k + 1) * MUT_STEP) ** 2) k++;
+  return k;
+}
+// Functions here take a level's seed, not the level. levels.js registers which level each seed
+// belongs to (noteLevel) so mutation can be looked up; an unregistered seed counts as level 0.
+const LVS = new Map();
+export function noteLevel(sL, lv) { if (LVS.get(sL) !== lv) LVS.set(sL, lv); }
+export const lvOf = (sL) => { const v = LVS.get(sL); return v === undefined ? 0 : v; };
+const mutF = (seed, x, z) => mutation(lvOf(seed), x, z) / 8;          // 0..1
+
+// ---- special rooms: in some RB x RB blocks, one big open room (4..7 cells a side) with a theme.
+// Its inside edges are all open, its outline is solid apart from a doorway on 2-4 sides (always two
+// opposite ones, so it is a way through). More of them further out.
+//   0 pits: the floor is a grid of holes down to the level below, with a ledge round the edge
+//   1 office: rows of desks and chairs     2 chairs: an audience of chairs all facing one wall
+//   3 pillars: a column at every inner grid point     4 dark: every light out but one
+//   5 frames: a door frame standing in every cell, all facing the same way
+export const RB = 12, ROOM_THEMES = 6;
+let rSeed = -1, rBX = 1e9, rBZ = 1e9, rOn = false;
+export let rX0 = 0, rZ0 = 0, rX1 = 0, rZ1 = 0, rTheme = 0, rH = 0;
+function roomAt(seed, bx, bz) {
+  if (bx === rBX && bz === rBZ && seed === rSeed) return rOn;
+  rSeed = seed; rBX = bx; rBZ = bz;
+  const m = mutation(lvOf(seed), bx * RB + RB / 2, bz * RB + RB / 2);
+  rOn = hashU(seed, 800, bx, bz) < U(0.14 + 0.03 * m);
+  if (!rOn) return false;
+  rTheme = hashU(seed, 805, bx, bz) % ROOM_THEMES; rH = hashU(seed, 806, bx, bz);
+  const big = rTheme === 1 || rTheme === 2 ? 2 : 4;               // furniture rooms stay smaller (vertex budget)
+  const w = 4 + hashU(seed, 801, bx, bz) % big, d = 4 + hashU(seed, 802, bx, bz) % big;
+  rX0 = bx * RB + 1 + hashU(seed, 803, bx, bz) % (RB - 1 - w); rX1 = rX0 + w;
+  rZ0 = bz * RB + 1 + hashU(seed, 804, bx, bz) % (RB - 1 - d); rZ1 = rZ0 + d;
+  return true;
+}
+// theme of the special room that cell (x, z) is inside, or -1. Leaves rX0.. describing that room.
+export function roomCell(seed, x, z) {
+  if (!roomAt(seed, Math.floor(x / RB), Math.floor(z / RB))) return -1;
+  return x >= rX0 && x < rX1 && z >= rZ0 && z < rZ1 ? rTheme : -1;
+}
+// -1: not a room edge, otherwise the edge's lineKind (0 inside, 1 outline, 2 doorway)
+function roomEdge(seed, salt, line, along) {
+  const hor = salt === SALT_H, x = hor ? along : line, z = hor ? line : along;
+  if (!roomAt(seed, Math.floor(x / RB), Math.floor(z / RB))) return -1;
+  let side, a0, len;
+  if (hor) {
+    if (x < rX0 || x >= rX1 || z < rZ0 || z > rZ1) return -1;
+    if (z > rZ0 && z < rZ1) return 0;
+    side = z === rZ0 ? 0 : 1; a0 = rX0; len = rX1 - rX0;
+  } else {
+    if (z < rZ0 || z >= rZ1 || x < rX0 || x > rX1) return -1;
+    if (x > rX0 && x < rX1) return 0;
+    side = x === rX0 ? 2 : 3; a0 = rZ0; len = rZ1 - rZ0;
+  }
+  const sides = (1 << (rH & 3)) | (1 << (rH & 3 ^ 1)) | ((rH >>> 4) & 15);   // 0/1 and 2/3 are opposite
+  return (sides >> side & 1) && along === a0 + 1 + hashU(seed, 810 + side, rBX, rBZ) % (len - 2) ? 2 : 1;
+}
+
 // Processions: in some PB x PB blocks, the same doorway repeated pN times, either
 //   in a line (pRow false): a one-cell corridor crossed by door after door, or
 //   side by side (pRow true): a wall of doors, each opening into its own one-cell closet.
@@ -69,14 +132,18 @@ export function procEdge(seed, salt, line, along) {
 }
 
 export function lineKind(seed, salt, line, along) {
+  const re = roomEdge(seed, salt, line, along);
+  if (re >= 0) return re;
   const pe = procEdge(seed, salt, line, along);
   if (pe >= 0) return pe >= 100 ? 2 : 1;
   const len = 2 + hashU(seed, salt, line, 1) % 5;
   const off = hashU(seed, salt, line, 2) % len;
   const run = Math.floor((along + off) / len);
-  if (hashU(seed, salt + 7, line, run) >= DENSITY_U) return 0;
+  const f = salt === SALT_H ? mutF(seed, along, line) : mutF(seed, line, along);
+  // further out: a little more wall, and more of it holed by windows
+  if (hashU(seed, salt + 7, line, run) >= DENSITY_U + U(0.07 * f)) return 0;
   if (hashU(seed, salt + 13, line, along) < DOOR_U) return 2;
-  return hashU(seed, salt + 14, line, along) < WINDOW_U ? 3 : 1;
+  return hashU(seed, salt + 14, line, along) < WINDOW_U + U(0.08 * f) ? 3 : 1;
 }
 export const kindH = (seed, x, z) => lineKind(seed, SALT_H, z, x);
 export const kindV = (seed, x, z) => lineKind(seed, SALT_V, x, z);
@@ -110,6 +177,11 @@ export function doorShape(seed, salt, line, along, out) {
   else if (r < 0.84) { out[0] = 1; w = 1.8 + 0.7 * u2; top = apex = 2.0 + 0.4 * u3; }      // wide opening
   else if (r < 0.89) { out[0] = 1; w = 0.72 + 0.18 * u2; top = apex = 1.7 + 0.2 * u3; }    // small door
   else { out[0] = 2; w = 1.0 + 1.4 * u2; top = 1.6 + 0.4 * u3; apex = Math.min(HEIGHT - 0.12, top + w * (0.25 + 0.25 * unit(hashU(seed, salt + 25, line, along)))); }
+  // further out some doors come out wrong: sunk low into the floor and squeezed narrow
+  if (out[0] === 1 && unit(hashU(seed, salt + 26, line, along)) < 0.4 * (salt === SALT_H ? mutF(seed, along, line) : mutF(seed, line, along))) {
+    const k = 0.4 + 0.45 * unit(hashU(seed, salt + 27, line, along));
+    top = apex = top * k; w *= 0.55 + 0.45 * k;
+  }
   const c = 0.5 * CELL + (unit(hashU(seed, salt + 24, line, along)) - 0.5) * (CELL - w - 0.6);
   out[1] = (c - w * 0.5) / CELL; out[2] = (c + w * 0.5) / CELL; out[3] = top; out[4] = apex;
   return out;
@@ -136,7 +208,8 @@ export function bow(seed, salt, line, along) {
   while (s > along - BOW_MAX && lineKind(seed, salt, line, s - 1) === 1) s--;
   while (e < along + BOW_MAX && lineKind(seed, salt, line, e) === 1) e++;
   bowS = s; bowE = e; bowLean = false;
-  if (e - s >= BOW_MAX || hashU(seed, salt + 31, line, s) >= BOW_U) return 0;
+  const f = salt === SALT_H ? mutF(seed, s, line) : mutF(seed, line, s), big = 1 + 1.3 * f;
+  if (e - s >= BOW_MAX || hashU(seed, salt + 31, line, s) >= BOW_U + U(0.4 * f)) return 0;
   const other = salt === SALT_H ? SALT_V : SALT_H;
   for (let v = s + 1; v < e; v++) if (lineKind(seed, other, v, line - 1) !== 0 || lineKind(seed, other, v, line) !== 0) return 0;
   const sign = (hashU(seed, salt + 33, line, s) & 1) ? 1 : -1;
@@ -144,9 +217,9 @@ export function bow(seed, salt, line, along) {
       && lineKind(seed, other, s, line - 1) === 0 && lineKind(seed, other, s, line) === 0
       && lineKind(seed, other, e, line - 1) === 0 && lineKind(seed, other, e, line) === 0) {
     bowLean = true;
-    return sign * (0.5 + 0.5 * unit(hashU(seed, salt + 32, line, s)));
+    return sign * Math.min(1.2, (0.5 + 0.5 * unit(hashU(seed, salt + 32, line, s))) * big);
   }
-  return sign * (0.25 + 0.35 * unit(hashU(seed, salt + 32, line, s)));
+  return sign * Math.min(0.7, (0.25 + 0.35 * unit(hashU(seed, salt + 32, line, s))) * big);
 }
 // sideways offset of a bowed wall at position p metres along its line
 const bowOff = (A, p) => A * Math.sin(Math.PI * (p - bowS * CELL) / ((bowE - bowS) * CELL));
@@ -158,12 +231,13 @@ const bowSlope = (A, p) => A * Math.PI / ((bowE - bowS) * CELL) * Math.cos(Math.
 // Dark zones are ZONE x ZONE cell blocks where nearly every panel is dead. Odd states stay sparse.
 export const ZONE = 5;
 export const LIGHT_U = { darkZone: U(0.09), darkFlicker: U(0.07), dead: U(0.13), flicker: U(0.03), broken: U(0.06), hang: U(0.075) };
+// Further out (mutation) more panels are dead, flickering, broken or hanging, and dark zones spread.
 export function lightKind(seed, x, z) {
-  const h = hashU(seed, 303, x, z);
-  if (hashU(seed, 500, Math.floor(x / ZONE), Math.floor(z / ZONE)) < LIGHT_U.darkZone) return h < LIGHT_U.darkFlicker ? 2 : 0;
-  if (h < LIGHT_U.dead) return 0;
-  const k = hashU(seed, 304, x, z);
-  return k < LIGHT_U.flicker ? 2 : k < LIGHT_U.broken ? 3 : k < LIGHT_U.hang ? 4 : 1;
+  const h = hashU(seed, 303, x, z), f = mutF(seed, x, z);
+  if (hashU(seed, 500, Math.floor(x / ZONE), Math.floor(z / ZONE)) < LIGHT_U.darkZone + U(0.12 * f)) return h < LIGHT_U.darkFlicker + U(0.1 * f) ? 2 : 0;
+  if (h < LIGHT_U.dead + U(0.17 * f)) return 0;
+  const k = hashU(seed, 304, x, z), fl = LIGHT_U.flicker + U(0.1 * f), br = fl + LIGHT_U.broken - LIGHT_U.flicker + U(0.04 * f);
+  return k < fl ? 2 : k < br ? 3 : k < br + LIGHT_U.hang - LIGHT_U.broken + U(0.04 * f) ? 4 : 1;
 }
 // Brightness 0..1 at time t (seconds). Flickering panels (and half the hanging ones) mostly burn
 // steadily, then stutter in bursts or drop out for half a second. The shader runs the same maths.
@@ -186,7 +260,7 @@ export const hangDir = (seed, x, z) => (hashU(seed, 311, x, z) & 1) ? 1 : -1;
 // two halves meet flush (no z-fighting).
 export const CHUNK = 8;
 export const MAX_HANG = 4;                              // hanging panels built per chunk (they're rare)
-export const MAX_VERTS = 12000;   // measured worst case ~4900 over 22k chunks; buildChunk stops writing at the limit
+export const MAX_VERTS = 24000;   // walls ~5000 at worst, plus props and furnished rooms; writers stop at the limit
 const FLOATS = 7;                                       // [px, py, pz, nx, ny, nz, material]
 
 // Writes the chunk's triangles into out (a Float32Array of at least MAX_VERTS * 7) and returns the
@@ -389,7 +463,7 @@ function push(pos, r, ax, az, bx, bz) {
 // from candidate cells (spiralling out from the origin) until one reaches `need` cells.
 export function findSpawn(seed, need = 600) {
   for (let r = 0; r < 50; r++) for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
-    if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== r || roomCell(seed, dx, dz) >= 0) continue;
     const seen = new Set([dx + ',' + dz]), stack = [dx, dz];
     while (stack.length && seen.size < need) {
       const z = stack.pop(), x = stack.pop();

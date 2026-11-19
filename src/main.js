@@ -128,7 +128,8 @@ async function start() {
     cam.x = pos[0]; cam.z = pos[1]; cam.y = camFeet + eye + Math.sin(bob) * (crouched ? 0.02 : 0.035);
     R.stream(cam.x, py, cam.z, false);
     R.render(ctx.getCurrentTexture().createView(), cam, now / 1000);
-    if (audio) audio.update(seed, levelOf(py + 1.0), cam.x, cam.z, now / 1000);
+    // (a bug in the sound must never stop the frame: the HUD below silently froze once)
+    if (audio) try { audio.update(seed, levelOf(py + 1.0), cam.x, cam.z, now / 1000); } catch (e) { console.error(e); audio = null; }
 
     fpsT += dt; fpsN++; if (fpsT >= 0.5) {
       const st = R.stats;

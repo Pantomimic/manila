@@ -186,7 +186,9 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
   let dAlong = select(fw.z, fw.x, alongX);
   let dFloor = max(fw.x, fw.z);
 
-  let g = smoothstep(0.3, 0.7, vnoise(i.wp.xz * 0.028 + 11.0 + f32(L) * 37.0));   // grime, in patches tens of metres wide
+  // further out (mutation 0..8) everything is dirtier, and the colours drift sickly in patches
+  let mu = f32(mutation(L, i32(floor(i.wp.x / CELL)), i32(floor(i.wp.z / CELL)))) / 8.0;
+  let g = mix(smoothstep(0.3, 0.7, vnoise(i.wp.xz * 0.028 + 11.0 + f32(L) * 37.0)), 1.0, 0.5 * mu);   // grime, in patches tens of metres wide
   var albedo: vec3f;
   if (i.m < 0.5) { albedo = carpet(i.wp.xz, dFloor, g); }
   else if (i.m < 1.5) { albedo = ceiling(i.wp.xz, dFloor, g, L); }
@@ -200,6 +202,8 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
   else if (i.m < 10.5) { albedo = vec3f(0.12, 0.13, 0.16); }  // chair fabric
   else { albedo = vec3f(0.40, 0.38, 0.33) * (0.9 + 0.2 * vnoise(i.wp.xz * 4.0 + i.wp.y * 3.0)); }   // concrete
 
+  let sick = mu * smoothstep(0.35, 0.75, vnoise(i.wp.xz * 0.06 + vec2f(3.0, f32(L) * 11.0)));
+  albedo = mix(albedo, albedo * vec3f(0.92, 0.95, 0.66), sick);
   let f = vec2i(floor(i.wp.xz / CELL));
   var light = vec3f(0.018, 0.016, 0.011);
   let up = 0.16 * clamp(-n.y, 0.0, 1.0);    // downward faces (ceiling, lintels, arch soffits) catch light bounced off the floor
@@ -229,7 +233,8 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32) -> vec3f {
       let ndl = max(dot(n, v * inverseSqrt(d2)), 0.0) + up;
       let hz = dot(v.xz, v.xz) / (1.5 * CELL * 1.5 * CELL);           // fades to 0 before the 3x3 window ends
       let win = max(1.0 - hz, 0.0);
-      let tint = select(vec3f(1.0, 0.97, 0.86), vec3f(0.93, 1.0, 0.95), kind == 3);   // bare tubes run cold and green
+      var tint = select(vec3f(1.0, 0.97, 0.86), vec3f(0.93, 1.0, 0.95), kind == 3);   // bare tubes run cold and green
+      tint = mix(tint, vec3f(0.86, 1.0, 0.78), 0.3 * mu * f32(hc(313u, c) & 1u));      // far out, some tubes have gone green
       light += tint * (3.6 * level * vis * ndl * win * win / (d2 + 0.8));
     }
   }

@@ -53,12 +53,12 @@ export function createAudio() {
         if (k === 0) continue;
         const lx = (X + 0.5) * CELL - x, lz = (Z + 0.5) * CELL - z;
         const w = 1 / (1 + (lx * lx + lz * lz) / 6);
-        const lv = lightLevel(sL, X, Z, k, t);
-        steady += w * lv;
+        const lvl = lightLevel(sL, X, Z, k, t);
+        steady += w * lvl;
         if (k === 2 || k === 4) {
           // a flickering panel crackles while it is stuttering (its level jumps between frames)
           const prev = lightLevel(sL, X, Z, k, t - 0.045);
-          if (Math.abs(prev - lv) > 0.3 || lv < 0.1) flick += w;
+          if (Math.abs(prev - lvl) > 0.3 || lvl < 0.1) flick += w;
         }
       }
       const now = ac.currentTime;

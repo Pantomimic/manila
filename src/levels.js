@@ -7,22 +7,17 @@
 // and "wrong" objects (a backwards stop sign stuck in the carpet, desks sunk into the floor or through
 // a wall, stretched chairs, a chair on the ceiling, a door frame standing on its own).
 // Everything here is a pure function of (seed, level, cell), like the walls in gen.js.
-import { CELL, HEIGHT, THICK, CHUNK, hashU, buildChunk, lightKind, kindH, kindV, wallLike } from './gen.js';
+import { CELL, HEIGHT, THICK, CHUNK, hashU, buildChunk, lightKind, kindH, kindV, wallLike, mutation, MUT_STEP, MUT_LEVEL, noteLevel, roomCell } from './gen.js';
+import * as G from './gen.js';                // live room bounds (G.rX0 ..) after roomCell
+export { mutation, MUT_STEP, MUT_LEVEL };
 
 export const FH = 3.4;                       // floor to floor: 2.8 m room + 0.6 m ceiling void and slab
 const U = (p) => Math.floor(p * 2 ** 32);
 const unit = (h) => (h >>> 8) / 16777216;
-export const levelSeed = (seed, lv) => lv === 0 ? seed : 1 + hashU(seed, 900, lv, 7) % 16777214;
+export const levelSeed = (seed, lv) => { const s = lv === 0 ? seed : 1 + hashU(seed, 900, lv, 7) % 16777214; noteLevel(s, lv); return s; };
 export const levelOf = (y) => Math.floor((y + 0.05) / FH);
 
-// ---- mutation: 0 near the start, +1 every 40 cells (120 m) out, levels count as 25 cells each ----
-export const MUT_STEP = 40, MUT_LEVEL = 25;
-export function mutation(lv, x, z) {
-  if (Math.abs(x) > 2000 || Math.abs(z) > 2000 || Math.abs(lv) > 60) return 8;
-  const d2 = x * x + z * z + lv * MUT_LEVEL * lv * MUT_LEVEL;
-  let k = 0; while (k < 8 && d2 >= ((k + 1) * MUT_STEP) ** 2) k++;
-  return k;
-}
+// mutation (gen.js): 0 near the start, +1 every 40 cells (120 m) out, levels count as 25 cells each
 const ramp = (a, b) => Array.from({ length: 9 }, (_, k) => U(a + (b - a) * k / 8));
 // per mutation level: missing ceiling tile, wrong object per cell, drop hole per cell
 export const MISS_U = ramp(0.004, 0.06), PROP_U = ramp(0.0015, 0.035), DROP_U = ramp(0.003, 0.012);
@@ -68,16 +63,26 @@ function dropRect(seed, lv, x, z, r) {
 const stH = new Float64Array(6);
 // opening in the floor of level lv at cell (x, z): a drop hole, or the top of a stairwell from below
 export function floorHole(seed, lv, x, z, r) {
-  if (dropAt(seed, lv, x, z)) { dropRect(seed, lv, x, z, r); return true; }
   if (stairAt(seed, lv - 1, x, z)) { wellRect(x, z, stairShape(seed, lv - 1, x, z, stH), r); return true; }
+  if (pitAt(seed, lv, x, z)) { r[0] = x * CELL + PIT_EDGE; r[1] = z * CELL + PIT_EDGE; r[2] = (x + 1) * CELL - PIT_EDGE; r[3] = (z + 1) * CELL - PIT_EDGE; return true; }
+  if (dropAt(seed, lv, x, z)) { dropRect(seed, lv, x, z, r); return true; }
   return false;
+}
+// pit room: every cell but the outer ring is a hole, leaving walkways PIT_EDGE * 2 wide between them
+const PIT_EDGE = 0.4;
+function pitAt(seed, lv, x, z) {
+  return roomCell(levelSeed(seed, lv), x, z) === 0 && x > G.rX0 && x < G.rX1 - 1 && z > G.rZ0 && z < G.rZ1 - 1 && !stairAt(seed, lv, x, z);
 }
 export const ceilHole = (seed, lv, x, z, r) => floorHole(seed, lv + 1, x, z, r);
 const rH = new Float64Array(4);
 const inRect = (r, px, pz) => px > r[0] && px < r[2] && pz > r[1] && pz < r[3];
 // light kind of a cell, with panels removed where the ceiling is open
 export function cellLight(seed, lv, x, z) {
-  return ceilHole(seed, lv, x, z, rH) ? 0 : lightKind(levelSeed(seed, lv), x, z);
+  if (ceilHole(seed, lv, x, z, rH)) return 0;
+  const sL = levelSeed(seed, lv);
+  if (roomCell(sL, x, z) === 4)                 // dark room: one flickering panel in the middle
+    return x === (G.rX0 + G.rX1 - 1) >> 1 && z === (G.rZ0 + G.rZ1 - 1) >> 1 ? 2 : 0;
+  return lightKind(sL, x, z);
 }
 
 // Height of whatever you would stand on at (px, pz), starting from level lv and falling through
@@ -122,6 +127,7 @@ export function propAt(seed, lv, x, z, out = pr) {
   out[0] = -1;
   if (hashU(seed, 950 + lv * 31, x, z) >= PROP_U[mutation(lv, x, z)]) return out;
   if (stairAt(seed, lv, x, z) || floorHole(seed, lv, x, z, rH) || ceilHole(seed, lv, x, z, rH)) return out;
+  if (roomCell(levelSeed(seed, lv), x, z) >= 0) return out;
   const h = hashU(seed, 951 + lv * 31, x, z);
   let t = h % 7;
   out[1] = unit(hashU(seed, 952 + lv * 31, x, z)) * Math.PI * 2;
@@ -149,22 +155,88 @@ function propCircles(seed, lv, x, z) {
   }
   if (t === 6) {                    // two posts of the door frame
     const c = Math.cos(p[1]), sn = Math.sin(p[1]);
-    circ[0] = cx + c * 0.62; circ[1] = cz + sn * 0.62; circ[2] = 0.2;
-    circ[3] = cx - c * 0.62; circ[4] = cz - sn * 0.62; circ[5] = 0.2;
+    circ[0] = cx + c * 0.62; circ[1] = cz - sn * 0.62; circ[2] = 0.2;
+    circ[3] = cx - c * 0.62; circ[4] = cz + sn * 0.62; circ[5] = 0.2;
     return circ;
   }
   circ[0] = cx; circ[1] = cz; circ[2] = t === 0 ? 0.15 : t === 1 ? 0.75 : t === 3 ? 0.4 : 0.45;
   return circ;
 }
+function pushCircle(pos, r, x, z, cr) {
+  const dx = pos[0] - x, dz = pos[1] - z, d = Math.hypot(dx, dz), rr = r + cr;
+  if (d < rr && d > 1e-6) { pos[0] = x + dx / d * rr; pos[1] = z + dz / d * rr; }
+}
+// props and special-room furniture push you out (circles; allocation free, runs every frame)
+let cPos = null, cR = 0;
+const solidOf = (type, px, py, pz, yaw, pitch, roll, sr) => {
+  if (sr <= 0) return;
+  if (type === ITEM_FRAME) {
+    const c = Math.cos(yaw) * 0.62, sn = Math.sin(yaw) * 0.62;
+    pushCircle(cPos, cR, px + c, pz - sn, sr); pushCircle(cPos, cR, px - c, pz + sn, sr);
+  } else pushCircle(cPos, cR, px, pz, sr);
+};
 export function collideProps(seed, lv, pos, r) {
   const cx = Math.floor(pos[0] / CELL), cz = Math.floor(pos[1] / CELL);
+  cPos = pos; cR = r;
   for (let z = cz - 1; z <= cz + 1; z++) for (let x = cx - 1; x <= cx + 1; x++) {
     const c = propCircles(seed, lv, x, z);
-    for (let k = 0; k < 6; k += 3) {
-      if (c[k + 2] <= 0) continue;
-      const dx = pos[0] - c[k], dz = pos[1] - c[k + 1], d = Math.hypot(dx, dz), rr = r + c[k + 2];
-      if (d < rr && d > 1e-6) { pos[0] = c[k] + dx / d * rr; pos[1] = c[k + 1] + dz / d * rr; }
+    for (let k = 0; k < 6; k += 3) if (c[k + 2] > 0) pushCircle(pos, r, c[k], c[k + 1], c[k + 2]);
+    furnish(seed, lv, x, z, solidOf);
+  }
+}
+
+// ---- special-room furniture (rooms themselves are laid out in gen.js) ----
+// furnish() calls emit(type, x, y, z, yaw, pitch, roll, solidRadius) for each item in cell (x, z):
+// x, z in metres, y = offset from the floor (negative: sunk into it). Used for both the geometry and
+// collision, so they always agree. Further out, more items come out wrong.
+export const ITEM_DESK = 0, ITEM_CHAIR = 1, ITEM_PILLAR = 2, ITEM_FRAME = 3;
+const PI = Math.PI;
+const isWrong = (sL, k, x, z, f) => hashU(sL, 830 + k, x, z) < U(0.03 + 0.35 * f);
+const rnd = (sL, k, x, z) => unit(hashU(sL, 860 + k, x, z));
+export function furnish(seed, lv, x, z, emit) {
+  const sL = levelSeed(seed, lv), t = roomCell(sL, x, z);
+  if (t < 1) return;
+  const x0 = G.rX0, z0 = G.rZ0, x1 = G.rX1, rh = G.rH, z1 = G.rZ1;   // copied: the calls below move the room cache
+  const dir = (rh >>> 8) & 3, yaw0 = dir * PI / 2, f = mutation(lv, x, z) / 8;
+  const mx = (x + 0.5) * CELL, mz = (z + 0.5) * CELL;
+  if (t === 3) {                                    // pillar on the cell's inner corner
+    if (x === x0 || z === z0) return;
+    const w = isWrong(sL, 0, x, z, f) ? hashU(sL, 840, x, z) % 3 : -1, u = rnd(sL, 0, x, z);
+    const bottom = w === 0 ? 0.9 + 1.2 * u : 0;    // stops short of the floor
+    const ox = w === 1 ? (u - 0.5) * 1.4 : 0, oz = w === 1 ? (rnd(sL, 1, x, z) - 0.5) * 1.4 : 0;
+    emit(ITEM_PILLAR, x * CELL + ox, bottom, z * CELL + oz, w === 2 ? 0.3 + u * 0.5 : 0, 0, 0, bottom > 1.2 ? 0 : 0.36);
+    return;
+  }
+  if (stairAt(seed, lv, x, z) || floorHole(seed, lv, x, z, rH) || ceilHole(seed, lv, x, z, rH)) return;
+  if (t === 1) {                                    // office: a desk, monitor and chair; some cells empty
+    if (hashU(sL, 831, x, z) % 6 === 0) return;
+    const w = isWrong(sL, 0, x, z, f) ? hashU(sL, 832, x, z) % 4 : -1, u = rnd(sL, 0, x, z);
+    emit(ITEM_DESK, mx, w === 1 ? -0.3 - 0.35 * u : 0, mz, w === 0 ? yaw0 + (u - 0.5) * 2.4 : yaw0, w === 2 ? 0.25 + 0.3 * u : 0, 0, 0.8);
+    const sx = Math.sin(yaw0) * 0.62, sz = Math.cos(yaw0) * 0.62;
+    if (w === 3) emit(ITEM_CHAIR, mx + sx, HEIGHT, mz + sz, yaw0 + PI, 0, PI, 0);
+    else emit(ITEM_CHAIR, mx + sx, 0, mz + sz, yaw0 + PI + (rnd(sL, 1, x, z) - 0.5) * 0.5, 0, 0, 0);
+    return;
+  }
+  if (t === 2) {                                    // audience: four chairs a cell, all facing one way
+    for (let k = 0; k < 4; k++) {
+      const px = mx + ((k & 1) ? 0.72 : -0.72), pz = mz + ((k & 2) ? 0.72 : -0.72);
+      const w = isWrong(sL, k, x, z, f) ? hashU(sL, 850 + k, x, z) % 4 : -1;
+      if (w === 0) emit(ITEM_CHAIR, px, 0, pz, yaw0 + PI, 0, 0, 0.3);              // turned round
+      else if (w === 1) emit(ITEM_CHAIR, px, 0.24, pz, yaw0 + 0.6, 0, PI / 2, 0.3);   // on its side
+      else if (w === 2) emit(ITEM_CHAIR, px, HEIGHT, pz, yaw0, 0, PI, 0);           // on the ceiling
+      else emit(ITEM_CHAIR, px, w === 3 ? -0.38 : 0, pz, yaw0, 0, 0, 0.3);         // (3: sunk to the seat)
     }
+    return;
+  }
+  if (t === 4) {                                    // dark room: one chair under the one light
+    if (x !== (x0 + x1 - 1) >> 1 || z !== (z0 + z1 - 1) >> 1) return;
+    emit(ITEM_CHAIR, mx, 0, mz, rnd(sL, 0, x, z) * 2 * PI, 0, 0, 0.35);
+    return;
+  }
+  if (t === 5) {                                    // frames: in step, or sinking row by row
+    const idx = (dir & 1) ? x - x0 : z - z0, sink = (rh >>> 12) & 1 ? 0.3 * idx : 0;
+    const w = isWrong(sL, 0, x, z, f);
+    emit(ITEM_FRAME, mx, -sink, mz, w ? yaw0 + (rnd(sL, 0, x, z) - 0.5) * 2 : yaw0, 0, 0, sink > 2.0 ? 0 : 0.2);
   }
 }
 
@@ -199,6 +271,37 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   };
   const loc = (R, o, l) => [o[0] + R[0] * l[0] + R[3] * l[1] + R[6] * l[2], o[1] + R[1] * l[0] + R[4] * l[1] + R[7] * l[2], o[2] + R[2] * l[0] + R[5] * l[1] + R[8] * l[2]];
 
+  // simpler furniture for the furnished rooms (fewer boxes: there are a lot of them)
+  const chairLite = (o, R) => {
+    OB(loc(R, o, [0, 0.45, 0]), [0.24, 0.04, 0.24], R, 10);
+    OB(loc(R, o, [0, 0.74, -0.22]), [0.22, 0.25, 0.03], R, 10);
+    OB(loc(R, o, [0, 0.22, 0]), [0.03, 0.22, 0.03], R, 6);
+    OB(loc(R, o, [0, 0.015, 0]), [0.22, 0.015, 0.22], R, 6);
+  };
+  // a door frame sunk s metres into the floor, cut off at floor level (so it can't poke out of the
+  // ceiling of the level below)
+  const frame = (o, R, s) => {
+    const top = HEIGHT - s, lb = Math.max(0, 2.05 - s);
+    if (top <= 0.02) return;
+    if (lb === 0) { OB(loc(R, o, [0, top / 2, 0]), [0.79, top / 2, THICK], R, 2); return; }   // only the lintel is left
+    OB(loc(R, o, [-0.62, top / 2, 0]), [0.17, top / 2, THICK], R, 2);
+    OB(loc(R, o, [0.62, top / 2, 0]), [0.17, top / 2, THICK], R, 2);
+    OB(loc(R, o, [0, (top + lb) / 2, 0]), [0.45, (top - lb) / 2, THICK], R, 2);
+  };
+  const build = (type, px, py, pz, yaw, pitch, roll) => {
+    const R = rot(yaw, pitch, roll), o = [px, y0 + py, pz];
+    if (type === ITEM_CHAIR) chairLite(o, R);
+    else if (type === ITEM_FRAME) { o[1] = y0; frame(o, R, -py); }
+    else if (type === ITEM_PILLAR) OB([px, y0 + (py + HEIGHT) / 2, pz], [0.25, (HEIGHT - py) / 2, 0.25], R, 2);
+    else {                                         // desk with side panels, modesty panel and a monitor
+      OB(loc(R, o, [0, 0.74, 0]), [0.7, 0.02, 0.35], R, 9);
+      OB(loc(R, o, [-0.67, 0.36, 0]), [0.02, 0.36, 0.33], R, 9);
+      OB(loc(R, o, [0.67, 0.36, 0]), [0.02, 0.36, 0.33], R, 9);
+      OB(loc(R, o, [0, 0.45, -0.31]), [0.65, 0.25, 0.01], R, 9);
+      OB(loc(R, o, [0, 1.0, -0.18]), [0.24, 0.16, 0.02], R, 10);
+      OB(loc(R, o, [0, 0.82, -0.2]), [0.03, 0.07, 0.03], R, 6);
+    }
+  };
   const st = new Float64Array(6), r = new Float64Array(4), p = new Float64Array(4);
   const x0 = cx * CHUNK, z0 = cz * CHUNK, MAX_BUNDLES = 8;
   let bundles = 0;
@@ -253,6 +356,7 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
         }
       }
     }
+    furnish(seed, lv, x, z, build);
     // wrong objects
     propAt(seed, lv, x, z, p);
     const t = p[0];
