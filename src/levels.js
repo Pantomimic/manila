@@ -255,7 +255,20 @@ export function tileMissing(seedL, lv, tx, tz) {
 }
 
 // ---- wrong objects ----
-// prop in cell (x, z) of level lv: [type, yaw, a, b] or type -1. Types: 0 backwards stop sign,
+// a stroke font for the stop sign: each letter is polylines on a 2 x 4 grid
+const STROKES = {
+  S: [[[2, 4], [0, 4], [0, 2], [2, 2], [2, 0], [0, 0]]], T: [[[0, 4], [2, 4]], [[1, 4], [1, 0]]], O: [[[0, 0], [2, 0], [2, 4], [0, 4], [0, 0]]],
+  P: [[[0, 0], [0, 4], [2, 4], [2, 2], [0, 2]]], A: [[[0, 0], [0, 4], [2, 4], [2, 0]], [[0, 2], [2, 2]]], Y: [[[0, 4], [1, 2], [2, 4]], [[1, 2], [1, 0]]],
+  W: [[[0, 4], [0, 0], [1, 1.6], [2, 0], [2, 4]]], I: [[[1, 0], [1, 4]], [[0.3, 4], [1.7, 4]], [[0.3, 0], [1.7, 0]]], L: [[[0, 4], [0, 0], [2, 0]]],
+  E: [[[2, 4], [0, 4], [0, 0], [2, 0]], [[0, 2], [1.5, 2]]], F: [[[2, 4], [0, 4], [0, 0]], [[0, 2], [1.5, 2]]], H: [[[0, 0], [0, 4]], [[2, 0], [2, 4]], [[0, 2], [2, 2]]],
+  K: [[[0, 0], [0, 4]], [[2, 4], [0, 2], [2, 0]]], C: [[[2, 4], [0, 4], [0, 0], [2, 0]]], N: [[[0, 0], [0, 4], [2, 0], [2, 4]]],
+  G: [[[2, 4], [0, 4], [0, 0], [2, 0], [2, 2], [1, 2]]], D: [[[0, 0], [0, 4], [1.3, 4], [2, 3.3], [2, 0.7], [1.3, 0], [0, 0]]],
+  R: [[[0, 0], [0, 4], [2, 4], [2, 2], [0, 2]], [[0.8, 2], [2, 0]]], B: [[[0, 0], [0, 4], [1.5, 4], [2, 3.5], [2, 2.5], [1.5, 2], [0, 2]], [[1.5, 2], [2, 1.5], [2, 0.5], [1.5, 0], [0, 0]]],
+  U: [[[0, 4], [0, 0], [2, 0], [2, 4]]], M: [[[0, 0], [0, 4], [1, 2.4], [2, 4], [2, 0]]],
+};
+const SIGN_WORDS = ['STAY', 'WAIT', 'LOST', 'HELP', 'WAKE', 'BACK', 'NO', 'GO', 'DOWN', 'LEFT', 'DONT', 'HERE', 'STOP', 'COME', 'HUSH'];
+
+// prop in cell (x, z) of level lv: [type, yaw, a, b] or type -1. Types: 0 stop sign (mirrored or not, rarely another word),
 // 1 desk sunk into the floor, 2 desk through a wall, 3 stretched chair, 4 chair on the ceiling,
 // 5 filing cabinet tilted into the floor, 6 a lone door frame
 const pr = new Float64Array(4);
@@ -1000,23 +1013,40 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     const t = p[0];
     if (t < 0) continue;
     const yaw = p[1];
-    if (t === 0) {                             // stop sign, stuck in the floor at a lean, facing the wrong way
+    if (t === 0) {                             // a stop sign stuck in the floor at a lean
       const R = rot(yaw, (p[2] - 0.5) * 0.7, (p[3] - 0.5) * 0.5), o = [mx, y0 - 0.35, mz];
-      OB(loc(R, o, [0, 1.1, 0]), [0.03, 1.1, 0.03], R, 6);
-      const c = loc(R, o, [0, 2.05, 0.04]), oct = (rad, zoff, m, nz) => {
+      RB(loc(R, o, [0, 1.12, 0]), [0.022, 1.12, 0.022], R, 6, 0.004);                       // square steel post
+      const c = loc(R, o, [0, 2.05, 0.03]), nz = [R[6], R[7], R[8]], T = 0.0025;
+      const oct = (rad, zo, m, sg) => {          // a flat octagon facing +z (sg 1) or -z (sg -1)
         for (let k = 0; k < 8; k++) {
-          const a0 = (k + 0.5) * Math.PI / 4, a1 = (k + 1.5) * Math.PI / 4;
-          const A = loc(R, c, [0, 0, zoff]), B = loc(R, c, [Math.cos(a0) * rad, Math.sin(a0) * rad, zoff]), C = loc(R, c, [Math.cos(a1) * rad, Math.sin(a1) * rad, zoff]);
-          V(...A, R[6] * nz, R[7] * nz, R[8] * nz, m); V(...B, R[6] * nz, R[7] * nz, R[8] * nz, m); V(...C, R[6] * nz, R[7] * nz, R[8] * nz, m);
+          const a0 = (k + 0.5) * PI / 4, a1 = (k + 1.5) * PI / 4;
+          const A = loc(R, c, [0, 0, zo]), B = loc(R, c, [Math.cos(a0) * rad, Math.sin(a0) * rad, zo]), C = loc(R, c, [Math.cos(a1) * rad, Math.sin(a1) * rad, zo]);
+          V(...A, nz[0] * sg, nz[1] * sg, nz[2] * sg, m); V(...B, nz[0] * sg, nz[1] * sg, nz[2] * sg, m); V(...C, nz[0] * sg, nz[1] * sg, nz[2] * sg, m);
         }
       };
-      oct(0.38, -0.005, 6, -1); oct(0.38, 0.0, 8, 1); oct(0.345, 0.004, 7, 1);
-      // "STOP" in a 3x5 pixel font, mirrored
-      const G = { S: [7, 4, 7, 1, 7], T: [7, 2, 2, 2, 2], O: [7, 5, 5, 5, 7], P: [7, 5, 7, 4, 4] }, px = 0.034;
-      'STOP'.split('').forEach((ch, li) => G[ch].forEach((row, ry) => { for (let cxp = 0; cxp < 3; cxp++) if (row & (4 >> cxp)) {
-        const gx = -((li * 4 + cxp) - 7) * px, gy = (2 - ry) * px;
-        Q(loc(R, c, [gx - px / 2, gy - px / 2, 0.008]), loc(R, c, [gx + px / 2, gy - px / 2, 0.008]), loc(R, c, [gx + px / 2, gy + px / 2, 0.008]), loc(R, c, [gx - px / 2, gy + px / 2, 0.008]), R[6], R[7], R[8], 8);
-      } }));
+      oct(0.38, -T, 6, -1); oct(0.38, T, 8, 1); oct(0.352, T + 0.0015, 7, 1);               // back, white border, red face
+      for (let k = 0; k < 8; k++) {                                                            // the plate's edge
+        const a0 = (k + 0.5) * PI / 4, a1 = (k + 1.5) * PI / 4, am = (k + 1) * PI / 4;
+        const e = (aa, zz) => loc(R, c, [Math.cos(aa) * 0.38, Math.sin(aa) * 0.38, zz]);
+        const n0 = [R[0] * Math.cos(am) + R[3] * Math.sin(am), R[1] * Math.cos(am) + R[4] * Math.sin(am), R[2] * Math.cos(am) + R[5] * Math.sin(am)];
+        Q(e(a0, -T), e(a1, -T), e(a1, T), e(a0, T), n0[0], n0[1], n0[2], 6);
+      }
+      for (const by of [0.2, -0.2]) CYL(loc(R, c, [0, by, -T]), loc(R, c, [0, by, -0.03]), 0.012, 6, 6, 2);   // bolts through to the post
+      // the word, in strokes; usually STOP, rarely something else. Mirrored about half the time.
+      const sL2 = sL, word = unit(hashU(sL2, 956, x, z)) < 0.07 + 0.25 * mutation(lv, x, z) / 8 ? SIGN_WORDS[hashU(sL2, 957, x, z) % SIGN_WORDS.length] : 'STOP';
+      const mir = (hashU(sL2, 958, x, z) & 1) ? -1 : 1, u = word.length <= 2 ? 0.07 : 0.05, sw = u * 0.62, adv = u * 3;
+      const x0w = -(word.length * adv - u) / 2, zt = T + 0.003;
+      const pt = (q) => loc(R, c, [mir * q[0], q[1], zt]);
+      word.split('').forEach((ch, li) => {
+        for (const line of STROKES[ch] || []) {
+          const P2 = line.map(([gx, gy]) => [x0w + li * adv + gx * u, (gy - 2) * u]);
+          for (let j = 0; j + 1 < P2.length; j++) {
+            const [ax, ay] = P2[j], [bx, by] = P2[j + 1], L = Math.hypot(bx - ax, by - ay) || 1, nx = -(by - ay) / L * sw / 2, ny = (bx - ax) / L * sw / 2;
+            const ex = (bx - ax) / L * sw / 2, ey = (by - ay) / L * sw / 2;                  // run each stroke on past its ends to close the corners
+            Q(pt([ax - ex - nx, ay - ey - ny]), pt([bx + ex - nx, by + ey - ny]), pt([bx + ex + nx, by + ey + ny]), pt([ax - ex + nx, ay - ey + ny]), nz[0], nz[1], nz[2], 8);
+          }
+        }
+      });
     } else if (t === 1) desk([mx, y0 - 0.25 - 0.3 * p[2], mz], rot(yaw, (p[3] - 0.5) * 0.2));
     else if (t === 2) {                        // desk half through a wall
       const s = p[1], along = (p[2] - 0.5) * 1.2;
