@@ -605,15 +605,42 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
       if (!poolAt(seed, lv, x - 1, z)) Q([ax, yb, bz], [ax, yb, az], [ax, y0, az], [ax, y0, bz], 1, 0, 0, 19);
       if (!poolAt(seed, lv, x + 1, z)) Q([bx, yb, az], [bx, yb, bz], [bx, y0, bz], [bx, y0, az], -1, 0, 0, 19);
       const I = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-      if (hashU(sL, 970, x, z) % 3 === 0) OB([mx, yb + 0.004, mz], [0.12, 0.004, 0.12], I, 14, B8);
-      if (!poolAt(seed, lv, x, z - 1) && !poolAt(seed, lv, x - 1, z)) {      // ladder in the pool's corner cell
-        const lz = az + 0.09;
-        for (const rx of [mx - 0.25, mx + 0.25]) {
-          OB([rx, (yb + y0 + 0.85) / 2, lz], [0.018, (y0 + 0.85 - yb) / 2, 0.018], I, 6, B8);
-          OB([rx, y0 + 0.85, lz - 0.17], [0.018, 0.018, 0.17], I, 6);
-          OB([rx, y0 + 0.43, az - 0.33], [0.018, 0.43, 0.018], I, 6, B8);
+      // coping: a rounded concrete lip along each edge, overhanging the basin a little. Pieces overlap
+      // by 2 cm to hide the rounded ends, each a fraction of a mm lower than its neighbour (no z-fighting);
+      // z edges run past the corner to cover it.
+      const CW = 0.15, CO = 0.035, CH = 0.022;
+      for (const [dx, dz] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+        if (poolAt(seed, lv, x + dx, z + dz)) continue;
+        if (dx === 0) {
+          const ez = dz < 0 ? az : bz, x0 = ax - (poolAt(seed, lv, x - 1, z) ? 0.02 : CW), x1 = bx + (poolAt(seed, lv, x + 1, z) ? 0.02 : CW);
+          RB([(x0 + x1) / 2, y0 - 0.008 - (x & 1) * 0.0006, ez + dz * (CW - CO) / 2], [(x1 - x0) / 2, CH, (CW + CO) / 2], I, 11, 0.018, B8);
+        } else {
+          const ex = dx < 0 ? ax : bx, z0 = az + (poolAt(seed, lv, x, z - 1) ? -0.02 : CO - 0.02), z1 = bz - (poolAt(seed, lv, x, z + 1) ? -0.02 : CO - 0.02);
+          RB([ex + dx * (CW - CO) / 2, y0 - 0.0083 - (z & 1) * 0.0006, (z0 + z1) / 2], [(CW + CO) / 2, CH, (z1 - z0) / 2], I, 11, 0.018, B8);
         }
-        for (let k = 1; k <= 2; k++) OB([mx, yb + k * POOL_D / 3, lz], [0.25, 0.012, 0.025], I, 6);
+      }
+      if (hashU(sL, 970, x, z) % 3 === 0) {                                  // round drain: rim, dark sump, grate bars
+        CYL([mx, yb, mz], [mx, yb + 0.006, mz], 0.13, 6, 16, 2);
+        CYL([mx, yb + 0.006, mz], [mx, yb + 0.0075, mz], 0.108, 14, 16, 2);
+        for (let k = -2; k <= 2; k++) { const oz = k * 0.04; OB([mx, yb + 0.009, mz + oz], [Math.sqrt(0.108 * 0.108 - oz * oz), 0.0015, 0.007], I, 6, B8); }
+      }
+      if (!poolAt(seed, lv, x, z - 1) && !poolAt(seed, lv, x - 1, z)) {      // ladder in the pool's corner cell
+        // two bent stainless tubes: up out of the basin, over the coping in a half circle, down into the deck
+        const fz = az + 0.11, top = y0 + 0.5, rr = 0.19, cz = fz - rr, r = 0.021;
+        for (const rx of [mx - 0.27, mx + 0.27]) {
+          let p = [rx, yb + 0.03, fz];
+          CYL([rx, yb, fz], p, r * 1.15, 14, 10, 1);                          // rubber foot
+          const step = (q) => { CYL(p, q, r, 6, 10); SPH(q, [r, r, r], I, 6, 4, 10); p = q; };
+          step([rx, top, fz]);
+          for (let k = 1; k <= 10; k++) { const t = k / 10 * PI; step([rx, top + rr * Math.sin(t), cz + rr * Math.cos(t)]); }
+          step([rx, y0, cz - rr]);
+          CYL([rx, y0, cz - rr], [rx, y0 + 0.012, cz - rr], 0.042, 6, 14, 2);   // deck flange
+        }
+        for (let k = 1; k <= 2; k++) {                                        // treads with a black anti-slip top
+          const ty = yb + k * POOL_D / 3 + 0.02;
+          RB([mx, ty, fz - 0.035], [0.25, 0.014, 0.065], I, 6, 0.008);
+          OB([mx, ty + 0.0145, fz - 0.035], [0.22, 0.001, 0.05], I, 14, B8);
+        }
       }
     }
     // ---- on the walls: outlets low down, return-air grilles up high, exit signs over some doors ----
