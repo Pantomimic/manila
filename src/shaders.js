@@ -26,11 +26,11 @@ struct VO { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) 
   var o: VO;
   o.pos = u.vp * vec4f(p, 1.0);
   o.wp = p; o.n = n; o.m = m;
-  // the figure (material 20) carries its feet position in place of a normal: within 14 m of the
-  // camera every one of its vertices goes off screen, so it is simply not there
+  // the mannequin (material 20) stands in the middle of its cell: within 14 m of the camera every one
+  // of its vertices goes off screen, so it is simply not there
   if (m > 19.5 && m < 20.5) {
-    o.n = vec3f(0.0, 1.0, 0.0);
-    if (distance(n.xz, u.cam.xz) < 14.0) { o.pos = vec4f(2.0, 2.0, 2.0, 1.0); }
+    let feet = (floor(p.xz / CELL) + 0.5) * CELL;
+    if (distance(feet, u.cam.xz) < 14.0) { o.pos = vec4f(2.0, 2.0, 2.0, 1.0); }
   }
   return o;
 }
@@ -287,7 +287,7 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
   else if (i.m < 17.5) { albedo = vec3f(0.3, 0.02, 0.01); }    // exit sign letters (lit below)
   else if (i.m < 18.5) { albedo = mix(vec3f(0.03), vec3f(0.5, 0.5, 0.47), step(0.45, fract(i.wp.y * 38.0))); }   // return-air grille
   else if (i.m < 19.5) { albedo = poolTile(select(select(i.wp.zy, i.wp.xy, alongX), i.wp.xz, !wall), g, max(max(fw.x, fw.y), fw.z)); }   // pool basin walls and floor
-  else if (i.m < 20.5) { albedo = vec3f(0.006, 0.006, 0.007); }  // the figure
+  else if (i.m < 20.5) { albedo = vec3f(0.63, 0.6, 0.55); }  // the mannequin: pale plastic
   else if (i.m > 99.5) { let q = (u32(i.m + 0.5) - 100u) & 32767u; albedo = vec3f(f32(q >> 10u), f32((q >> 5u) & 31u), f32(q & 31u)) * (1.0 / 31.0); }   // colour by number (levels.js PAL)
   else { albedo = vec3f(0.46, 0.37, 0.26) * (0.92 + 0.16 * vnoise(vec2f(i.wp.y * 40.0, along * 2.0))); }   // painted door
 
@@ -358,6 +358,7 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
   if (i.m > 12.5 && i.m < 14.5) { ks = select(0.22, 0.6, i.m < 13.5); }       // glass; black plastic
   if (i.m > 15.5 && i.m < 16.5) { ks = 0.1; }                                 // beige plastic
   if (i.m > 20.5) { ks = 0.08; }                                              // door paint
+  if (i.m > 19.5 && i.m < 20.5) { ks = 0.45; }                               // the mannequin's glossy plastic
   if (i.m > 65535.5) { ks = 0.35; }                                           // glossy colours: car paint, cans
   if ((i.m > 18.5 && i.m < 19.5) || (room == 9 && (i.m < 0.5 || (i.m > 1.5 && i.m < 2.5)))) { ks = 0.3; }   // glazed tile
   if (SHINY && ks > 0.0 && !wet) {   // from the panel over this spot, as bright as the light arriving here
@@ -431,6 +432,7 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
     if (hc(331u, f) % 4u == 0u) { on = select(1.0, 0.08, fract(sin(floor(u.cam.w * 9.0) * 12.9898 + f32(f.x * 7 + f.y)) * 43758.5) < 0.3); }
     col += vec3f(1.0, 0.05, 0.02) * 5.0 * on;
   }
+  if (SHINY && i.m > 19.5 && i.m < 20.5) { col += vec3f(0.07, 0.066, 0.06) * (0.6 + 0.4 * max(n.y, 0.0)); }   // the mannequin's pale plastic shows even in the dark
   let dist = length(vin.wp - u.cam.xyz);
   col = mix(col, vec3f(0.045, 0.038, 0.02), 1.0 - exp(-dist * 0.03));
   col *= 1.0 - u.misc.y * smoothstep(3.5, 7.5, dist);   // in the hallway the far end is lost in the dark (misc.y fades in)

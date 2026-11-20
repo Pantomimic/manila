@@ -457,6 +457,13 @@ export const ITEM_DESK = 0, ITEM_CHAIR = 1, ITEM_PILLAR = 2, ITEM_FRAME = 3, ITE
 const PI = Math.PI;
 const isWrong = (sL, k, x, z, f) => hashU(sL, 830 + k, x, z) < U(0.03 + 0.35 * f);
 const rnd = (sL, k, x, z) => unit(hashU(sL, 860 + k, x, z));
+// a chair sunk into the floor by min..min + 0.6 m (not past its seat back), upright or (lean 1) going
+// down at an angle, like something settling into mud
+function sinkChair(emit, type, sL, x, z, px, pz, yaw, min, lean) {
+  const u = unit(hashU(sL, 880, x, z)), v = unit(hashU(sL, 881, x, z)), w = unit(hashU(sL, 882, x, z));
+  const d = Math.min(type === ITEM_SEAT ? 0.8 : 0.85, min + 0.6 * u * u);
+  emit(type, px, -d, pz, yaw + (v - 0.5) * 0.4, lean ? (v - 0.5) * 0.6 : 0, lean ? (w - 0.5) * 0.5 : 0, d > 0.55 ? 0 : 0.3);
+}
 export function furnish(seed, lv, x, z, emit) {
   const sL = levelSeed(seed, lv), t = roomCell(sL, x, z);
   if (t < 1 || t === 6 || t === 7 || t >= 9 && t <= 11) return;   // red, wet, pool, hallway, follow: shader and geometry elsewhere
@@ -484,27 +491,32 @@ export function furnish(seed, lv, x, z, emit) {
   if (stairAt(seed, lv, x, z) || floorHole(seed, lv, x, z, rH) || ceilHole(seed, lv, x, z, rH)) return;
   if (t === 1) {                                    // office: a desk, monitor and chair; some cells empty
     if (hashU(sL, 831, x, z) % 6 === 0) return;
-    const w = isWrong(sL, 0, x, z, f) ? hashU(sL, 832, x, z) % 4 : -1, u = rnd(sL, 0, x, z);
+    const w = isWrong(sL, 0, x, z, f) ? hashU(sL, 832, x, z) % 5 : -1, u = rnd(sL, 0, x, z);
     emit(ITEM_DESK, mx, w === 1 ? -0.3 - 0.35 * u : 0, mz, w === 0 ? yaw0 + (u - 0.5) * 2.4 : yaw0, w === 2 ? 0.25 + 0.3 * u : 0, 0, 0.8);
     const sx = Math.sin(yaw0) * 0.62, sz = Math.cos(yaw0) * 0.62;
     if (w === 3) emit(ITEM_CHAIR, mx + sx, HEIGHT, mz + sz, yaw0 + PI, 0, PI, 0);
+    else if (w === 4) sinkChair(emit, ITEM_CHAIR, sL, x, z, mx + sx, mz + sz, yaw0 + PI + (rnd(sL, 1, x, z) - 0.5) * 0.5, 0.15, 0);
     else emit(ITEM_CHAIR, mx + sx, 0, mz + sz, yaw0 + PI + (rnd(sL, 1, x, z) - 0.5) * 0.5, 0, 0, 0);
     return;
   }
   if (t === 2) {                                    // audience: four chairs a cell, all facing one way
+    // now and then the whole room is going down: each row a little deeper than the one before
+    const row = (dir & 1) ? x - x0 : z - z0, rowSink = ((rh >>> 16) & 7) === 0 ? Math.min(0.85, 0.09 * row) : 0;
     for (let k = 0; k < 4; k++) {
       const px = mx + ((k & 1) ? 0.72 : -0.72), pz = mz + ((k & 2) ? 0.72 : -0.72);
-      const w = isWrong(sL, k, x, z, f) ? hashU(sL, 850 + k, x, z) % 4 : -1;
-      if (w === 0) emit(ITEM_SEAT, px, 0, pz, yaw0 + PI, 0, 0, 0.3);              // turned round
+      const w = isWrong(sL, k, x, z, f) ? hashU(sL, 850 + k, x, z) % 6 : -1;
+      if (w === 0) emit(ITEM_SEAT, px, -rowSink, pz, yaw0 + PI, 0, 0, 0.3);       // turned round
       else if (w === 1) emit(ITEM_SEAT, px, 0.24, pz, yaw0 + 0.6, 0, PI / 2, 0.3);   // on its side
       else if (w === 2) emit(ITEM_SEAT, px, HEIGHT, pz, yaw0, 0, PI, 0);           // on the ceiling
-      else emit(ITEM_SEAT, px, w === 3 ? -0.38 : 0, pz, yaw0, 0, 0, 0.3);         // (3: sunk to the seat)
+      else if (w >= 3) sinkChair(emit, ITEM_SEAT, sL, x * 4 + k, z, px, pz, yaw0, 0.08 + rowSink, w === 5 ? 1 : 0);   // sunk, some at a lean
+      else emit(ITEM_SEAT, px, -rowSink, pz, yaw0, 0, 0, rowSink > 0.6 ? 0 : 0.3);
     }
     return;
   }
   if (t === 4) {                                    // dark room: one chair under the one light
     if (x !== (x0 + x1 - 1) >> 1 || z !== (z0 + z1 - 1) >> 1) return;
-    emit(ITEM_SEAT, mx, 0, mz, rnd(sL, 0, x, z) * 2 * PI, 0, 0, 0.35);
+    if (isWrong(sL, 7, x, z, f)) sinkChair(emit, ITEM_SEAT, sL, x, z, mx, mz, rnd(sL, 0, x, z) * 2 * PI, 0.1, 1);
+    else emit(ITEM_SEAT, mx, 0, mz, rnd(sL, 0, x, z) * 2 * PI, 0, 0, 0.35);
     return;
   }
   if (t === 8) {                                    // cubicles: partitions on the inner edges, a gap at one end
@@ -521,7 +533,9 @@ export function furnish(seed, lv, x, z, emit) {
     if (hashU(sL, 872, x, z) % 2 === 0) {
       const w = isWrong(sL, 0, x, z, f), u = rnd(sL, 0, x, z);
       emit(ITEM_DESK, mx + 0.3, w ? -0.4 : 0, mz + 0.3, yaw0 + (w ? (u - 0.5) * 2 : 0), 0, 0, 0.8);
-      emit(ITEM_CHAIR, mx + 0.3 + Math.sin(yaw0) * 0.62, 0, mz + 0.3 + Math.cos(yaw0) * 0.62, yaw0 + PI + (u - 0.5) * 0.6, 0, 0, 0);
+      const cxs = mx + 0.3 + Math.sin(yaw0) * 0.62, czs = mz + 0.3 + Math.cos(yaw0) * 0.62, cy = yaw0 + PI + (u - 0.5) * 0.6;
+      if (isWrong(sL, 6, x, z, f) && hashU(sL, 873, x, z) % 2 === 0) sinkChair(emit, ITEM_CHAIR, sL, x, z, cxs, czs, cy, 0.15, 1);
+      else emit(ITEM_CHAIR, cxs, 0, czs, cy, 0, 0, 0);
     }
     return;
   }
@@ -1031,29 +1045,36 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
         }
       });
     }
-    // ---- rarely, at the far end of a long open view, someone standing (the shader hides them up close) ----
+    // ---- rarely, at the far end of a long open view, a mannequin standing (the shader hides it up close) ----
     const fd = figureAt(seed, lv, x, z);
     if (fd >= 0) {
       const dx = fd === 0 ? 1 : fd === 1 ? -1 : 0, dz = fd === 2 ? 1 : fd === 3 ? -1 : 0;
       const R = rot(dx > 0 ? Math.PI / 2 : dx < 0 ? -Math.PI / 2 : dz > 0 ? 0 : Math.PI), o = [mx, y0, mz];
-      const n0 = n, P = (q) => loc(R, o, q);
-      for (const sx of [-1, 1]) {                                    // legs: thigh, shin, foot
-        CYL(P([sx * 0.08, 0.95, 0]), P([sx * 0.075, 0.5, 0.01]), 0.062, 20, 7, 0, 0.046);
-        CYL(P([sx * 0.075, 0.5, 0.01]), P([sx * 0.07, 0.08, -0.01]), 0.046, 20, 7, 0, 0.034);
-        RB(P([sx * 0.072, 0.035, 0.035]), [0.042, 0.035, 0.11], R, 20, 0.03, B8);
+      // a shop mannequin: smooth, featureless, joints showing, on a display stand with a rod into one calf
+      const P = (q) => loc(R, o, q), F = 20, Rh = tiltX(R, -0.22);
+      CYL(P([0, 0, 0.05]), P([0, 0.018, 0.05]), 0.21, F, 20, 2, 0.2);                     // stand: base plate
+      CYL(P([0.085, 0.018, 0.05]), P([0.085, 0.36, 0.02]), 0.011, F, 6);                    // rod
+      for (const sx of [-1, 1]) {                                                            // legs: thigh, knee, shin, ankle, foot
+        CYL(P([sx * 0.085, 0.93, 0]), P([sx * 0.075, 0.52, 0.012]), 0.07, F, 12, 0, 0.048);
+        SPH(P([sx * 0.075, 0.5, 0.012]), [0.05, 0.05, 0.05], R, F, 6, 10);
+        CYL(P([sx * 0.075, 0.5, 0.012]), P([sx * 0.07, 0.1, -0.005]), 0.047, F, 12, 0, 0.03);
+        SPH(P([sx * 0.07, 0.085, -0.005]), [0.032, 0.035, 0.035], R, F, 5, 8);
+        SPH(P([sx * 0.072, 0.04, 0.05]), [0.042, 0.035, 0.115], R, F, 6, 10);
       }
-      SPH(P([0, 0.95, 0]), [0.155, 0.13, 0.1], R, 20, 5, 8);               // hips
-      SPH(P([0, 1.13, 0.005]), [0.15, 0.17, 0.09], R, 20, 5, 8);           // belly
-      SPH(P([0, 1.34, 0.005]), [0.175, 0.19, 0.1], R, 20, 5, 8);           // chest
-      for (const sx of [-1, 1]) {                                    // shoulders, arms hanging close, long hands
-        SPH(P([sx * 0.175, 1.47, 0]), [0.06, 0.055, 0.055], R, 20, 4, 6);
-        CYL(P([sx * 0.185, 1.47, 0]), P([sx * 0.195, 1.15, -0.01]), 0.045, 20, 6, 0, 0.038);   // arms hang against the body
-        CYL(P([sx * 0.195, 1.15, -0.01]), P([sx * 0.19, 0.86, 0.02]), 0.037, 20, 6, 0, 0.028);
-        SPH(P([sx * 0.19, 0.79, 0.025]), [0.025, 0.08, 0.038], R, 20, 4, 6);
+      SPH(P([0, 0.93, 0]), [0.165, 0.12, 0.11], R, F, 8, 14);                              // hips
+      SPH(P([0, 1.1, 0.005]), [0.125, 0.14, 0.085], R, F, 8, 14);                          // waist
+      SPH(P([0, 1.31, 0.01]), [0.175, 0.17, 0.105], R, F, 8, 14);                          // chest
+      for (const sx of [-1, 1]) SPH(P([sx * 0.07, 1.33, 0.07]), [0.07, 0.065, 0.045], R, F, 6, 10);   // the moulded chest
+      CYL(P([0, 1.45, 0.005]), P([0, 1.58, 0.02]), 0.05, F, 12, 0, 0.042);                 // neck
+      SPH(P([0, 1.68, 0.045]), [0.082, 0.112, 0.095], Rh, F, 9, 14);                        // head: an egg, no face
+      for (const sx of [-1, 1]) {                                                            // arms held a little out, ball joints
+        const sh = [sx * 0.185, 1.42, 0], el = [sx * 0.235, 1.15, -0.02], wr = [sx * 0.25, 0.9, 0.04];
+        SPH(P(sh), [0.058, 0.058, 0.058], R, F, 6, 10);
+        CYL(P(sh), P(el), 0.045, F, 10, 0, 0.036);
+        SPH(P(el), [0.036, 0.036, 0.036], R, F, 5, 8);
+        CYL(P(el), P(wr), 0.035, F, 10, 0, 0.026);
+        SPH(P([sx * 0.252, 0.82, 0.05]), [0.022, 0.08, 0.045], tiltX(R, 0.12), F, 6, 10);   // hand, fingers together
       }
-      CYL(P([0, 1.48, 0]), P([0, 1.63, 0.02]), 0.045, 20, 7, 0, 0.04);    // neck, a little long
-      SPH(P([0, 1.73, 0.035]), [0.08, 0.115, 0.095], tiltX(R, -0.3), 20, 6, 8);   // head, bowed slightly
-      for (let v = n0; v < n; v += FLOATS) { out[v + 3] = mx; out[v + 4] = y0; out[v + 5] = mz; }   // feet, for the vertex shader
     }
     // ---- one-offs ----
     const egg = eggAt(seed, lv, x, z);
@@ -1277,8 +1298,8 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   return nv;
 }
 // materials drawn with highlights: metal, sign red/white, laminate, glass, black and beige plastic,
-// drawer fronts, pool tile, door paint
-const SHINY = new Uint8Array(32); for (const m of [6, 7, 8, 9, 13, 14, 15, 16, 19, 21]) SHINY[m] = 1;
+// drawer fronts, pool tile, the mannequin, door paint
+const SHINY = new Uint8Array(32); for (const m of [6, 7, 8, 9, 13, 14, 15, 16, 19, 20, 21]) SHINY[m] = 1;
 let part = null;
 const rbP = new Float64Array(64 * 3);
 // vertex index where the last chunk built by buildLevelChunk switches to glossy materials
