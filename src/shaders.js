@@ -67,7 +67,7 @@ fn cellTex(c: vec2i) -> vec4f { if (!gOk) { return vec4f(0.0); } return textureL
 fn lightLevel(c: vec2i, kind: i32) -> f32 { let t = cellTex(c); return lightLevelT(c, kind, t.z, t.w); }
 fn lightLevelT(c: vec2i, kind: i32, base: f32, flags: f32) -> f32 {
   if (kind == 0) { return 0.0; }
-  if (kind != 2 && !(kind == 4 && flags >= 1.5)) { return base; }
+  if (kind != 2 && !(kind == 4 && fract(flags * 0.25) > 0.375)) { return base; }   // flags bit 2: hanging panel flickers
   let t = u.cam.w;
   let ph = unit(hc(307u, c)) * 64.0;
   let C = vec2u(bitcast<u32>(c.x), bitcast<u32>(c.y));
@@ -75,14 +75,16 @@ fn lightLevelT(c: vec2i, kind: i32, base: f32, flags: f32) -> f32 {
   if (r < 0.2) { return select(0.03, base, unit(hashU(seed() + 7927u, C.x, C.y, u32(i32(floor(t * 23.0 + ph * 5.0))))) < 0.55); }
   return select(base, 0.02, r < 0.27);
 }
-// where a cell's light comes from: the ceiling panel, or the middle of a hanging one
+// where a cell's light comes from: its panel (which may sit off the grid), or the middle of a hanging one
+// (levels.js lightGeom, via the world texture)
 fn lightPos(c: vec2i, kind: i32) -> vec3f {
   let m = vec3f((f32(c.x) + 0.5) * CELL, HEIGHT - 0.05, (f32(c.y) + 0.5) * CELL);
   if (kind != 4) { return m; }
-  let a = 0.65 + 0.5 * unit(hc(310u, c));
-  let s = select(-1.0, 1.0, (hc(311u, c) & 1u) == 1u);
-  return vec3f(m.x, HEIGHT - 0.1 - 0.6 * sin(a) - 0.1, m.z - s * 0.6 + s * 0.6 * cos(a));
+  let o = textureLoad(world, cellTexel(c.x, c.y) + vec2i(256, 0), 0).xyz;
+  return vec3f(m.x + o.x, o.y, m.z + o.z);
 }
+// the panel's rectangle in the ceiling: centre offset from the cell centre (xy), half sizes (zw)
+fn panelRect(c: vec2i) -> vec4f { if (!gOk) { return vec4f(0.0, 0.0, 0.3, 0.6); } return textureLoad(world, cellTexel(c.x, c.y) + vec2i(192, 0), 0); }
 
 // ---- light visibility. The line from a surface point to a light in a neighbouring cell crosses at
 // most one vertical and one horizontal grid line. Light gets through where that crossing falls inside
@@ -385,28 +387,26 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
 
   // fluorescent panel in the middle of this cell's ceiling (2 ft x 4 ft troffer)
   if (i.m > 0.5 && i.m < 1.5) {
-    let l = (fract(i.wp.xz / CELL) - 0.5) * CELL;
-    let e = vec2f(0.3, 0.6) - abs(l);
+    let ct = cellTex(f);
+    var pr = vec4f(0.0, 0.0, 0.3, 0.6);
+    if (ct.w > 3.5) { pr = panelRect(f); }                 // flags bit 4: off the grid or another size
+    let l = (fract(i.wp.xz / CELL) - 0.5) * CELL - pr.xy;
+    let e = pr.zw - abs(l);
     if (min(e.x, e.y) > 0.0) {
-      let kind = lightKind(f);
-      var level = lightLevel(f, kind);
+      let kind = i32(ct.x + 0.5);
+      var level = lightLevelT(f, kind, ct.z, ct.w);
       if (room == 10 && level > 0.0) { level = 0.9; }
       if (room == 11 && any(f != camC)) { level = 0.0; }
       if (min(e.x, e.y) < 0.03 && kind != 4) { col = vec3f(0.62, 0.62, 0.58) * light; }   // metal frame
       else if (kind == 4) { col = vec3f(0.003, 0.0028, 0.0025); }                // empty hole in the grid
-      else if (kind == 3) {                                                                // cover gone: two bare tubes
-        let tube = 1.0 - smoothstep(0.018, 0.026, abs(abs(l.x) - 0.1));
-        let dead2 = select(1.0, 0.0, (hc(312u, f) & 1u) == 1u && l.x > 0.0);              // often one tube is out
-        let refl = vec3f(0.36, 0.36, 0.34) * (light + 0.3 * level);
-        col = mix(refl, vec3f(0.92, 1.0, 0.95) * 12.0 * level * dead2 + vec3f(0.2) * (1.0 - dead2) * light, tube);
-      }
+      else if (kind == 3) { col = vec3f(0.5, 0.5, 0.47) * (light + 0.6 * level); }       // cover gone: the white reflector behind the tubes (levels.js)
       else if (level > 0.05) {
         let grid = 0.94 + 0.06 * step(0.5, fract(l.x * 40.0)) * clamp(1.0 - dFloor * 60.0, 0.0, 1.0);
         col = select(vec3f(1.0, 0.98, 0.88), vec3f(1.0, 0.04, 0.015), room == 6) * select(7.0, 4.0, room == 6) * level * grid * smoothstep(0.03, 0.09, min(e.x, e.y) + 0.03);
       } else { col = vec3f(0.16, 0.16, 0.15) * (light + 0.05); }                          // dead (or flickered off)
     }
   }
-  // the diffuser of a hanging panel
+  // the diffuser of a hanging panel, or a bare tube (cold) where the cover is gone
   if (i.m > 3.5 && i.m < 4.5) {
     let level = lightLevel(f, 4);
     col = select(vec3f(0.16, 0.16, 0.15) * (light + 0.05), vec3f(1.0, 0.98, 0.88) * 6.0 * level, level > 0.05);

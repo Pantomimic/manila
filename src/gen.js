@@ -241,14 +241,14 @@ const bowSlope = (A, p) => A * Math.PI / ((bowE - bowS) * CELL) * Math.cos(Math.
 //   0 dead, 1 on, 2 flickering, 3 broken cover (bare tubes), 4 hanging (one end dropped out of the grid)
 // Dark zones are ZONE x ZONE cell blocks where nearly every panel is dead. Odd states stay sparse.
 export const ZONE = 5;
-export const LIGHT_U = { darkZone: U(0.09), darkFlicker: U(0.07), dead: U(0.13), flicker: U(0.03), broken: U(0.06), hang: U(0.075) };
+export const LIGHT_U = { darkZone: U(0.09), darkFlicker: U(0.07), dead: U(0.13), flicker: U(0.03), broken: U(0.06), hang: U(0.072) };
 // Further out (mutation) more panels are dead, flickering, broken or hanging, and dark zones spread.
 export function lightKind(seed, x, z) {
   const h = hashU(seed, 303, x, z), f = mutF(seed, x, z);
   if (hashU(seed, 500, Math.floor(x / ZONE), Math.floor(z / ZONE)) < LIGHT_U.darkZone + U(0.12 * f)) return h < LIGHT_U.darkFlicker + U(0.1 * f) ? 2 : 0;
   if (h < LIGHT_U.dead + U(0.17 * f)) return 0;
   const k = hashU(seed, 304, x, z), fl = LIGHT_U.flicker + U(0.1 * f), br = fl + LIGHT_U.broken - LIGHT_U.flicker + U(0.04 * f);
-  return k < fl ? 2 : k < br ? 3 : k < br + LIGHT_U.hang - LIGHT_U.broken + U(0.04 * f) ? 4 : 1;
+  return k < fl ? 2 : k < br ? 3 : k < br + LIGHT_U.hang - LIGHT_U.broken + U(0.025 * f) ? 4 : 1;
 }
 // Brightness 0..1 at time t (seconds). Flickering panels (and half the hanging ones) mostly burn
 // steadily, then stutter in bursts or drop out for half a second. The shader runs the same maths.
@@ -261,16 +261,12 @@ export function lightLevel(seed, x, z, kind, t) {
   if (r < 0.2) return unit(hashU(seed + 7927, x, z, Math.floor(t * 23 + ph * 5))) < 0.55 ? base : 0.03;
   return r < 0.27 ? 0.02 : base;
 }
-// Hanging panel pose: angle below the ceiling (radians) and which end dropped (+1 = free end at +z).
-export const hangAngle = (seed, x, z) => 0.65 + 0.5 * unit(hashU(seed, 310, x, z));
-export const hangDir = (seed, x, z) => (hashU(seed, 311, x, z) & 1) ? 1 : -1;
 
 // The world is streamed in square chunks of CHUNK x CHUNK cells. A chunk owns the horizontal edges on
 // lines z0..z1-1 and the vertical edges on lines x0..x1-1 inside it, so every edge belongs to exactly
 // one chunk. Wall runs that cross a chunk border are split there without the end overlap, so the
 // two halves meet flush (no z-fighting).
 export const CHUNK = 8;
-export const MAX_HANG = 4;                              // hanging panels built per chunk (they're rare)
 export const MAX_VERTS = 200000;  // a chunk's CPU build buffer; walls ~5000 at worst, the rest furniture; writers stop at the limit
 const FLOATS = 7;                                       // [px, py, pz, nx, ny, nz, material]
 
@@ -385,30 +381,6 @@ export function buildChunk(seed, cx, cz, out, opt = {}) {
         i = e;
       }
     }
-  }
-  // hanging panels: a 0.6 x 1.2 m box hinged at one short end, the other end swung down, plus a cable
-  let hung = 0;
-  for (let z = z0; z < z1 && hung < MAX_HANG; z++) for (let x = x0; x < x1 && hung < MAX_HANG; x++) {
-    if ((opt.light ? opt.light(x, z) : lightKind(seed, x, z)) !== 4) continue;
-    hung++;
-    const a = hangAngle(seed, x, z), s = hangDir(seed, x, z), ca = Math.cos(a), sa = Math.sin(a);
-    const mx = (x + 0.5) * CELL, mz = (z + 0.5) * CELL, py = H - 0.1, pz = mz - s * 0.6;
-    const uy = -sa, uz = s * ca;            // along the panel, hinge -> free end
-    const ny = -ca, nz = -s * sa;           // diffuser normal (faces down/outward)
-    const T = 0.1, L = 1.2, W = 0.3;
-    // diffuser face corners (hinge h, free f) and the back face offset by -n*T
-    const hy = py, hz = pz, fy = py + uy * L, fz = pz + uz * L;
-    const by = -ny * T, bz = -nz * T;
-    quad(mx - W, hy, hz, mx + W, hy, hz, mx + W, fy, fz, mx - W, fy, fz, 0, ny, nz, 4);
-    quad(mx - W, hy + by, hz + bz, mx + W, hy + by, hz + bz, mx + W, fy + by, fz + bz, mx - W, fy + by, fz + bz, 0, -ny, -nz, 3);
-    quad(mx - W, hy, hz, mx - W, fy, fz, mx - W, fy + by, fz + bz, mx - W, hy + by, hz + bz, -1, 0, 0, 3);
-    quad(mx + W, hy, hz, mx + W, fy, fz, mx + W, fy + by, fz + bz, mx + W, hy + by, hz + bz, 1, 0, 0, 3);
-    quad(mx - W, fy, fz, mx + W, fy, fz, mx + W, fy + by, fz + bz, mx - W, fy + by, fz + bz, 0, uy, uz, 3);
-    quad(mx - W, hy, hz, mx + W, hy, hz, mx + W, hy + by, hz + bz, mx - W, hy + by, hz + bz, 0, -uy, -uz, 3);
-    // a cable hanging out of the hole in the grid, as two crossed thin strips
-    const wx = mx + 0.15, wz = mz + s * 0.25, ex = wx + 0.08, ey = H - 0.55 - 0.3 * sa, ez = wz + s * 0.12, k = 0.008;
-    quad(wx - k, H, wz, wx + k, H, wz, ex + k, ey, ez, ex - k, ey, ez, 0, 0, 1, 5);
-    quad(wx, H, wz - k, wx, H, wz + k, ex, ey, ez + k, ex, ey, ez - k, 1, 0, 0, 5);
   }
   return n / FLOATS;
 }

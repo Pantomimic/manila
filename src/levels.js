@@ -108,6 +108,79 @@ export function cellLight(seed, lv, x, z) {
   return lightKind(sL, x, z);
 }
 
+// ---- where a cell's light panel is, and how a hanging one hangs ----
+// lightGeom fills out: [ox, oz, hx, hz, lx, ly, lz]: the panel's rectangle in the ceiling (centre
+// offset from the cell centre, half sizes), and where its light comes from (offset from the cell
+// centre, height above the floor). Near the start every panel is a 2x4 ft troffer in the middle of
+// its cell; further out more of them are shifted off the tile grid, turned, or the wrong size.
+// The shader reads both from the world texture (render.js fillData).
+// A hanging panel (kind 4) also sets hang: variant (0 swung down from one short end, 1 from one long
+// side, 2 dropped level on its wires, 3 hanging from a corner), the pivot (offset from the cell centre,
+// height), the pivot in the panel's own frame, and the rotation.
+const PANEL_SIZES = [[0.3, 0.6], [0.3, 0.3], [0.15, 0.6], [0.3, 1.2], [0.45, 0.45], [0.6, 0.6], [0.2, 0.9]];
+export const hang = { v: -1, P: new Float64Array(3), q: new Float64Array(3), R: new Float64Array(9) };
+const axisRot = (R, kx, ky, kz, a) => {               // R = rotation by a about unit axis k (columns = images of x, y, z)
+  const c = Math.cos(a), s = Math.sin(a), t = 1 - c;
+  R[0] = c + kx * kx * t; R[1] = ky * kx * t + kz * s; R[2] = kz * kx * t - ky * s;
+  R[3] = kx * ky * t - kz * s; R[4] = c + ky * ky * t; R[5] = kz * ky * t + kx * s;
+  R[6] = kx * kz * t + ky * s; R[7] = ky * kz * t - kx * s; R[8] = c + kz * kz * t;
+};
+export function lightGeom(seed, lv, x, z, kind, out) {
+  const sL = levelSeed(seed, lv), t = roomCell(sL, x, z), f = mutation(lv, x, z) / 8;
+  let ox = 0, oz = 0, hx = 0.3, hz = 0.6;
+  // the hallway repeats exactly, the follow room and closet stay plain, the wet room's reflections assume the grid
+  if (!(t === 4 || t === 7 || t >= 10) && unit(hashU(sL, 340, x, z)) < 0.012 + 0.3 * f) {
+    const sz = PANEL_SIZES[hashU(sL, 341, x, z) % (kind === 4 ? 3 : PANEL_SIZES.length)];   // hanging ones stay small
+    const k = 0.9 + 0.25 * unit(hashU(sL, 342, x, z)) * f;
+    [hx, hz] = (hashU(sL, 343, x, z) & 1) ? [sz[1] * k, sz[0] * k] : [sz[0] * k, sz[1] * k];
+    const m = 0.15 + 0.7 * f;
+    ox = Math.max(-1, Math.min(1, (unit(hashU(sL, 344, x, z)) * 2 - 1))) * Math.min(m, 1.4 - hx);
+    oz = Math.max(-1, Math.min(1, (unit(hashU(sL, 345, x, z)) * 2 - 1))) * Math.min(m, 1.4 - hz);
+  }
+  out[0] = ox; out[1] = oz; out[2] = hx; out[3] = hz;
+  out[4] = ox; out[5] = HEIGHT - 0.05; out[6] = oz;
+  hang.v = -1;
+  if (kind !== 4) return out;
+  const h = hashU(sL, 346, x, z), u1 = unit(hashU(sL, 347, x, z)), r = unit(h);
+  const v = r < 0.35 ? 0 : r < 0.6 ? 1 : r < 0.8 ? 2 : 3;
+  const longZ = hz >= hx, L = longZ ? hz : hx, S = longZ ? hx : hz;
+  // swing toward the middle of the cell, so the panel stays inside it
+  const towards = (o) => (Math.abs(o) > 0.05 ? (o > 0 ? -1 : 1) : (h & 16) ? 1 : -1);
+  const P = hang.P, q = hang.q, R = hang.R;
+  if (v === 2) {                                     // dropped level, hanging on its wires
+    const d = 0.3 + 0.42 * u1;
+    q[0] = q[1] = q[2] = 0; P[0] = ox; P[1] = HEIGHT - d; P[2] = oz;
+    const yaw = (unit(hashU(sL, 348, x, z)) - 0.5) * 0.5, pit = (unit(hashU(sL, 349, x, z)) - 0.5) * 0.35, rol = (((h >>> 8) & 255) / 255 - 0.5) * 0.35;
+    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pit), sp = Math.sin(pit), cr = Math.cos(rol), sr = Math.sin(rol);
+    // yaw, then pitch about x, then roll about z (same order as rot())
+    const X = [cy, 0, -sy], Z = [sy, 0, cy], Y1 = [Z[0] * sp, cp, Z[2] * sp], Z1 = [Z[0] * cp, -sp, Z[2] * cp];
+    const X2 = [X[0] * cr + Y1[0] * sr, X[1] * cr + Y1[1] * sr, X[2] * cr + Y1[2] * sr], Y2 = [Y1[0] * cr - X[0] * sr, Y1[1] * cr - X[1] * sr, Y1[2] * cr - X[2] * sr];
+    R.set([...X2, ...Y2, ...Z1]);
+  } else {
+    let ux = 0, uz = 0, a;
+    if (v === 0) {                                   // hinged at one short end
+      const s = towards(longZ ? oz : ox);
+      if (longZ) { uz = s; q[0] = 0; q[2] = -s * L; } else { ux = s; q[0] = -s * L; q[2] = 0; }
+      a = 0.55 + 0.6 * u1;
+    } else if (v === 1) {                            // hinged along one long side
+      const s = towards(longZ ? ox : oz);
+      if (longZ) { ux = s; q[0] = -s * S; q[2] = 0; } else { uz = s; q[0] = 0; q[2] = -s * S; }
+      a = 0.75 + 0.7 * u1;
+    } else {                                         // one corner still caught in the grid
+      const sx = towards(ox), sz = towards(oz), d = Math.hypot(hx, hz);
+      q[0] = -sx * hx; q[2] = -sz * hz; ux = sx * hx / d; uz = sz * hz / d;
+      a = 1.05 + 0.4 * u1;
+    }
+    q[1] = 0; P[0] = ox + q[0]; P[1] = HEIGHT; P[2] = oz + q[2];
+    axisRot(R, uz, 0, -ux, a);                       // axis u x down: turns u toward the floor
+  }
+  hang.v = v;
+  // the light: the middle of the diffuser, a little below it
+  const lx = -q[0], ly = -0.16 - q[1], lz = -q[2];
+  out[4] = P[0] + R[0] * lx + R[3] * ly + R[6] * lz; out[5] = P[1] + R[1] * lx + R[4] * ly + R[7] * lz; out[6] = P[2] + R[2] * lx + R[5] * ly + R[8] * lz;
+  return out;
+}
+
 // cellLight, but with the follow room's rule applied for someone in cell (pcx, pcz)
 export function liveLight(seed, lv, x, z, pcx, pcz) {
   const k = cellLight(seed, lv, x, z);
@@ -465,6 +538,14 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     }
   };
 
+  // a cable from a to b sagging by sag in the middle (a parabola), as a chain of round segments
+  const cable = (a, b, sag, r, m, seg = 8, ring = 5) => {
+    let p = a;
+    for (let j = 1; j <= seg; j++) {
+      const t = j / seg, q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t - sag * 4 * t * (1 - t), a[2] + (b[2] - a[2]) * t];
+      CYL(p, q, r, m, ring); p = q;
+    }
+  };
   // ---- furniture. Origins at the floor centre; a seat faces +z, a desk's user side is +z.
   // Materials: 6 metal, 9 laminate, 10 fabric, 13 screen, 14 black plastic, 15 drawer fronts, 16 beige plastic
   const B8 = 8;                                // leave out bottom faces
@@ -570,6 +651,8 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     else desk(o, R);
   };
   const st = new Float64Array(6), r = new Float64Array(4), p = new Float64Array(4);
+  const LG = new Float64Array(7), pL = new Float64Array(4), rL = new Float64Array(4), RD = new Float64Array(9), I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  let hungN = 0;
   const x0 = cx * CHUNK, z0 = cz * CHUNK, MAX_BUNDLES = 8;
   let bundles = 0;
   for (let z = z0; z < z0 + CHUNK; z++) for (let x = x0; x < x0 + CHUNK; x++) {
@@ -706,6 +789,49 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
       for (let v = n0; v < n; v += FLOATS) { out[v + 3] = mx; out[v + 4] = y0; out[v + 5] = mz; }   // feet, for the vertex shader
     }
     if (ceilHole(seed, lv, x, z, r)) continue;
+    // ---- broken and hanging light panels (the shader draws the rest flat in the ceiling) ----
+    const kL = cellLight(seed, lv, x, z);
+    if (kL === 3 || (kL === 4 && hungN < 6)) {
+      lightGeom(seed, lv, x, z, kL, LG);
+      const ox = LG[0], oz = LG[1], hx = LG[2], hz = LG[3], cxL = mx + ox, czL = mz + oz, yC = y0 + HEIGHT;
+      const longZ = hz >= hx, L = longZ ? hz : hx, S = longZ ? hx : hz;
+      const P2 = (a, c, y) => longZ ? [cxL + c, y, czL + a] : [cxL + a, y, czL + c];   // along the long side, across it
+      if (kL === 3) {                          // the cover's gone: two bare tubes in their sockets, the ballast channel
+        const dead = (hashU(sL, 312, x, z) & 1) === 1;
+        for (const side of [-1, 1]) {
+          const c = side * S * 0.33;
+          CYL(P2(-(L - 0.045), c, yC - 0.034), P2(L - 0.045, c, yC - 0.034), 0.0127, dead && side > 0 ? 8 : 4, 8, 3);
+          for (const e of [-1, 1]) RB(P2(e * (L - 0.026), c, yC - 0.024), longZ ? [0.024, 0.024, 0.02] : [0.02, 0.024, 0.024], I3, 16, 0.006);
+        }
+        RB(P2(0, 0, yC - 0.009), longZ ? [S * 0.14, 0.009, L - 0.07] : [L - 0.07, 0.009, S * 0.14], I3, 3, 0.004);
+        // the lens door: on the floor underneath, hanging open from one side, or gone
+        const dv = hashU(sL, 350, x, z) % 10;
+        if (dv < 4 && roomCell(sL, x, z) < 0 && propAt(seed, lv, x, z, pL)[0] < 0 && !floorHole(seed, lv, x, z, rL) && !stairAt(seed, lv, x, z)) {
+          const u = unit(hashU(sL, 351, x, z)), R = rot((u - 0.5) * 1.4), o = [cxL + (u - 0.5) * 0.7, y0 + 0.008, czL + (unit(hashU(sL, 354, x, z)) - 0.5) * 0.7];
+          RB(o, [hx, 0.008, hz], R, 3, 0.004, B8);
+          OB(loc(R, o, [0, 0.0085, 0]), [hx - 0.02, 0.0012, hz - 0.02], R, 8, B8);
+        } else if (dv < 8) {
+          const s = (hashU(sL, 352, x, z) & 1) ? 1 : -1, a = 1.3 + 0.25 * unit(hashU(sL, 353, x, z));
+          const ux = longZ ? -s : 0, uz = longZ ? 0 : -s;                 // hinge -> free edge
+          axisRot(RD, uz, 0, -ux, a);
+          const piv = P2(0, s * S, yC - 0.004);
+          RB(loc(RD, piv, [ux * S, -0.008, uz * S]), [hx, 0.008, hz], RD, 3, 0.004);
+          OB(loc(RD, piv, [ux * S, -0.0172, uz * S]), [hx - 0.02, 0.0012, hz - 0.02], RD, 8);
+        }
+      } else {                                 // hanging: housing and diffuser, its wires, the flex conduit
+        hungN++;
+        const R = hang.R, q = hang.q, piv = [mx + hang.P[0], y0 + hang.P[1], mz + hang.P[2]];
+        const W = (lx, ly, lz) => loc(R, piv, [lx - q[0], ly - q[1], lz - q[2]]);
+        RB(W(0, -0.055, 0), [hx, 0.055, hz], R, 3, 0.012);
+        OB(W(0, -0.1125, 0), [hx - 0.025, 0.003, hz - 0.025], R, 4);
+        if (hang.v === 2) for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+          const ex = sx * (hx - 0.03), ez = sz * (hz - 0.03);
+          CYL([cxL + ex * 1.05, yC + 0.02, czL + ez * 1.05], W(ex, 0, ez), 0.0022, 6, 4);
+        }
+        const a0 = [cxL + 0.08 * (longZ ? 1 : 0.5), yC + 0.03, czL + 0.08 * (longZ ? 0.5 : 1)], b0 = W(0.1 * (longZ ? 1 : 0), 0, 0.1 * (longZ ? 0 : 1));
+        cable(a0, b0, 0.12 + 0.12 * unit(hashU(sL, 355, x, z)), 0.0085, 6, 8, 6);
+      }
+    }
     // cable bundles drooping out of missing ceiling tiles
     const tx0 = x * 5, tz0 = Math.floor((z * CELL - 0.3) / 0.6);
     for (let tz = tz0; tz < tz0 + 6; tz++) for (let tx = tx0; tx < tx0 + 5; tx++) {
@@ -713,22 +839,43 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
       if (ccz < z * CELL || ccz >= (z + 1) * CELL) continue;          // tile centre must be in this cell
       if (bundles >= MAX_BUNDLES || !tileMissing(sL, lv, tx, tz) || hashU(sL, 701, tx, tz) >= U(0.3)) continue;
       bundles++;
-      // a bundle: k cables leaving the hole roughly together, each drooping a little differently
+      // a bundle: k cables leaving the hole roughly together. Most loop back up into the ceiling, some
+      // dangle with a plug on the end, and now and then one has slumped all the way down onto the floor.
       const ccx = (tx + 0.5) * 0.6, k = 3 + hashU(sL, 702, tx, tz) % 5, hb = hashU(sL, 704, tx, tz);
-      const ang0 = unit(hb) * 6.283, len0 = 0.8 + 1.6 * unit(hashU(sL, 705, tx, tz)), sag0 = 0.4 + 0.9 * unit(hashU(sL, 706, tx, tz));
+      const ang0 = unit(hb) * 6.283, len0 = 0.8 + 1.6 * unit(hashU(sL, 705, tx, tz)), sag0 = 0.4 + 0.8 * unit(hashU(sL, 706, tx, tz));
+      const floorOk = roomCell(sL, x, z) < 0 && !floorHole(seed, lv, x, z, rL) && !stairAt(seed, lv, x, z) && propAt(seed, lv, x, z, pL)[0] < 0;
+      const top = y0 + HEIGHT + 0.04;
       for (let c = 0; c < k; c++) {
-        const hc = hashU(sL, 703 + c, tx, tz), jit = (b) => ((hc >>> b) & 255) / 255 - 0.5;
-        const ang = ang0 + jit(0) * 0.5, len = len0 * (1 + jit(8) * 0.3), sag = sag0 * (1 + jit(16) * 0.5);
-        const loop = (hc >>> 24) % 5 !== 0;    // most loop back up into the ceiling, some just dangle
-        const ax = ccx + jit(4) * 0.2, az = ccz + jit(12) * 0.2;
-        const bx = ax + Math.cos(ang) * len, bz = az + Math.sin(ang) * len, w = 0.005 + 0.004 * ((hc >>> 20) & 3) / 3;
-        const SEG = 8, pt = (t) => loop
-          ? [ax + (bx - ax) * t, y0 + HEIGHT + 0.05 - sag * 4 * t * (1 - t), az + (bz - az) * t]
-          : [ax + (bx - ax) * 0.12 * t, y0 + HEIGHT + 0.05 - sag * 1.3 * t, az + (bz - az) * 0.12 * t];
-        for (let j = 0; j < SEG; j++) {
-          const a = pt(j / SEG), b = pt((j + 1) / SEG);
-          Q([a[0] - w, a[1], a[2]], [a[0] + w, a[1], a[2]], [b[0] + w, b[1], b[2]], [b[0] - w, b[1], b[2]], 0, 0, 1, 5);
-          Q([a[0], a[1], a[2] - w], [a[0], a[1], a[2] + w], [b[0], b[1], b[2] + w], [b[0], b[1], b[2] - w], 1, 0, 0, 5);
+        const hc = hashU(sL, 703 + c, tx, tz), hd = hashU(sL, 720 + c, tx, tz), jit = (b) => ((hc >>> b) & 255) / 255 - 0.5;
+        const ty = unit(hd);                     // what kind of cable
+        const [w, m] = ty < 0.45 ? [0.004 + 0.002 * unit(hc), 5] : ty < 0.65 ? [0.008, 14] : ty < 0.8 ? [0.0035, 16] : ty < 0.93 ? [0.011, 6] : [0.005, 7];
+        const ang = ang0 + jit(0) * 0.6, len = len0 * (1 + jit(8) * 0.35), sag = sag0 * (1 + jit(16) * 0.5);
+        const ax = ccx + jit(4) * 0.22, az = ccz + jit(12) * 0.22, a = [ax, top, az];
+        const shape = (hc >>> 24) % 20;          // 0-11 loop, 12-17 dangle, 18-19 down to the floor
+        if (shape < 12) {
+          cable(a, [ax + Math.cos(ang) * len, top - 0.02, az + Math.sin(ang) * len], Math.min(sag, HEIGHT - 1.2), w, m, 10);
+        } else if (shape < 18 || !floorOk) {     // dangling: a gentle curve down, sometimes a plug on the end
+          const dl = 0.35 + 1.1 * unit(hashU(sL, 730 + c, tx, tz)), dx = Math.cos(ang) * 0.25, dz = Math.sin(ang) * 0.25;
+          let pp = a;
+          for (let j = 1; j <= 8; j++) {
+            const t = j / 8, q = [ax + dx * t * t + jit(20) * 0.05 * Math.sin(t * 5), top - dl * t, az + dz * t * t];
+            CYL(pp, q, w, m, 5); pp = q;
+          }
+          if ((hd >>> 4) & 1) RB([pp[0], pp[1] - 0.02, pp[2]], [w + 0.007, 0.024, w + 0.005], I3, (hd >>> 5) & 1 ? 14 : 16, 0.004);
+          else if (m === 5 || m === 14) for (const s2 of [-1, 1]) CYL(pp, [pp[0] + s2 * 0.012, pp[1] - 0.03, pp[2] + 0.006], 0.0012, 6, 3);   // bare wires
+        } else {                                 // slumped onto the floor: down in a curve, then along the carpet
+          const kx = (v) => Math.max(x * CELL + 0.15, Math.min((x + 1) * CELL - 0.15, v)), kz = (v) => Math.max(z * CELL + 0.15, Math.min((z + 1) * CELL - 0.15, v));   // stay in the cell
+          const fx = kx(ax + Math.cos(ang) * 0.4), fz = kz(az + Math.sin(ang) * 0.4), fy = y0 + w;
+          let pp = a;
+          for (let j = 1; j <= 10; j++) {         // quadratic curve: from the hole, pulled down toward the floor
+            const t = j / 10, u = 1 - t, q = [u * u * ax + 2 * u * t * ax + t * t * fx, u * u * top + 2 * u * t * (fy + 0.1) + t * t * fy, u * u * az + 2 * u * t * az + t * t * fz];
+            CYL(pp, q, w, m, 5); pp = q;
+          }
+          const run = 0.5 + 0.9 * unit(hashU(sL, 731 + c, tx, tz)), a2 = ang + jit(20) * 1.2;
+          for (let j = 1; j <= 4; j++) {
+            const q = [kx(fx + Math.cos(a2) * run * j / 4 + Math.sin(j * 1.7 + c) * 0.04), fy, kz(fz + Math.sin(a2) * run * j / 4 + Math.cos(j * 1.3 + c) * 0.04)];
+            CYL(pp, q, w, m, 5); pp = q;
+          }
         }
       }
     }

@@ -2,7 +2,7 @@
 // runs in the browser (main.js) and headless in Node for screenshots (tools/shot.mjs).
 // No allocations in render() apart from what WebGPU itself needs per frame.
 import { CELL, CHUNK, MAX_VERTS, edgeSpan, SALT_H, SALT_V, roomCell, hashU } from './gen.js';
-import { FH, buildLevelChunk, levelSeed, levelOf, cellLight, shinyFrom } from './levels.js';
+import { FH, buildLevelChunk, levelSeed, levelOf, cellLight, lightGeom, shinyFrom } from './levels.js';
 import { SCENE } from './shaders.js';
 import { POST } from './post.js';
 
@@ -40,27 +40,33 @@ export function createRenderer(device, outFormat, seed) {
   // around the camera, addressed by world cell mod DATA, for the levels below, at and above the
   // camera (texture rows [0, DATA), [DATA, 2 DATA), [2 DATA, 3 DATA)). Columns [0, DATA) hold the
   // horizontal edge of each cell, [DATA, 2 DATA) the vertical edge (both as edgeSpan floats),
-  // [2 DATA, 3 DATA) the light kind (x), special room theme + 1 (y), steady brightness (z) and flags (w).
-  const DATA = 64;
-  const dataArr = new Float32Array(DATA * 3 * DATA * 3 * 4);
-  const dataTex = device.createTexture({ size: [DATA * 3, DATA * 3], format: 'rgba32float', usage: TU.TEXTURE_BINDING | TU.COPY_DST });
+  // [2 DATA, 3 DATA) the light kind (x), special room theme + 1 (y), steady brightness (z) and flags (w),
+  // [3 DATA, 4 DATA) the panel's rectangle (centre offset x, z from the cell centre, half sizes) and
+  // [4 DATA, 5 DATA) where its light comes from (offset x, height, offset z) (levels.js lightGeom).
+  const DATA = 64, COLS = DATA * 5, LG = new Float64Array(7);
+  const dataArr = new Float32Array(COLS * DATA * 3 * 4);
+  const dataTex = device.createTexture({ size: [COLS, DATA * 3], format: 'rgba32float', usage: TU.TEXTURE_BINDING | TU.COPY_DST });
   const fillData = (pcx, pcz, plv) => {
     const bx = pcx * CHUNK - 28, bz = pcz * CHUNK - 28;      // covers the loaded chunks plus one cell
     for (let li = 0; li < 3; li++) {
       const lv = plv - 1 + li, sL = levelSeed(seed, lv);
       for (let z = bz; z < bz + DATA; z++) for (let x = bx; x < bx + DATA; x++) {
-        const row = ((z & (DATA - 1)) + li * DATA) * DATA * 3, col = x & (DATA - 1);
+        const row = ((z & (DATA - 1)) + li * DATA) * COLS, col = x & (DATA - 1);
         edgeSpan(sL, SALT_H, z, x, dataArr, (row + col) * 4);
         edgeSpan(sL, SALT_V, x, z, dataArr, (row + DATA + col) * 4);
-        dataArr[(row + 2 * DATA + col) * 4] = cellLight(seed, lv, x, z);
+        const kind = cellLight(seed, lv, x, z);
+        lightGeom(seed, lv, x, z, kind, LG);
+        dataArr[(row + 2 * DATA + col) * 4] = kind;
+        for (let k = 0; k < 4; k++) dataArr[(row + 3 * DATA + col) * 4 + k] = LG[k];
+        for (let k = 0; k < 3; k++) dataArr[(row + 4 * DATA + col) * 4 + k] = LG[4 + k];
         dataArr[(row + 2 * DATA + col) * 4 + 1] = roomCell(sL, x, z) + 1;      // special room theme + 1 (0: none)
         // the light's steady brightness (z) and two coin flips (w: 1 tube gone green, 2 hanging panel flickers),
-        // worked out here once instead of per pixel per light in the shader
+        // worked out here once instead of per pixel per light in the shader; 4: the panel is off the grid or another size
         dataArr[(row + 2 * DATA + col) * 4 + 2] = 0.82 + 0.18 * ((hashU(sL, 306, x, z) >>> 8) / 16777216);
-        dataArr[(row + 2 * DATA + col) * 4 + 3] = (hashU(sL, 313, x, z) & 1) + 2 * (hashU(sL, 305, x, z) & 1);
+        dataArr[(row + 2 * DATA + col) * 4 + 3] = (hashU(sL, 313, x, z) & 1) + (kind === 4 ? 2 * (hashU(sL, 305, x, z) & 1) : 0) + (LG[0] || LG[1] || LG[2] !== 0.3 || LG[3] !== 0.6 ? 4 : 0);
       }
     }
-    Q.writeTexture({ texture: dataTex }, dataArr, { bytesPerRow: DATA * 3 * 16 }, [DATA * 3, DATA * 3]);
+    Q.writeTexture({ texture: dataTex }, dataArr, { bytesPerRow: COLS * 16 }, [COLS, DATA * 3]);
   };
   const recenter = (pcx, pcz, plv) => {
     curCX = pcx; curCZ = pcz; curLV = plv; nWant = 0; wantHead = 0;
