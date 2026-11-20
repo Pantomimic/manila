@@ -273,7 +273,8 @@ const FLOATS = 7;                                       // [px, py, pz, nx, ny, 
 // Writes the chunk's triangles into out (a Float32Array of at least MAX_VERTS * 7) and returns the
 // vertex count. Materials: 0 carpet, 1 ceiling, 2 wallpaper, 3 light housing, 4 light diffuser, 5 cable.
 // opt (all optional): y0 = height of this floor; floorHole / ceilHole(x, z, rect) -> true and rect =
-// [x0, z0, x1, z1] in metres when the cell's floor / ceiling has an opening; light(x, z) -> light kind.
+// [x0, z0, x1, z1] in metres when the cell's floor / ceiling has an opening; light(x, z) -> light kind;
+// cut(salt, line, i, out): see cutRun.
 const rectH = new Float64Array(4);
 export function buildChunk(seed, cx, cz, out, opt = {}) {
   const y0 = opt.y0 || 0;
@@ -320,6 +321,33 @@ export function buildChunk(seed, cx, cz, out, opt = {}) {
     if (y0 > 0) Q(a0, -T, y0, a1, -T, y0, a1, T, y0, a0, T, y0, 0, 0, -1, 2);
     if (y1 < H - 1e-3) Q(a0, -T, y1, a1, -T, y1, a1, T, y1, a0, T, y1, 0, 0, 1, 2);
   };
+  // A straight wall run where opt.cut(salt, line, i, out) asks for part of an edge to be cut away:
+  // out = [a0, a1, y0, y1], the wall is removed below the line from (a0, y0) to (a1, y1) (a stair
+  // pushed into it). Built edge by edge; false (and nothing built) when no edge in the run is cut.
+  const cutA = new Float64Array(4);
+  const cutRun = (salt, line, i, e, ea, eb) => {
+    let any = false;
+    for (let j = i; j < e && !any; j++) any = opt.cut(salt, line, j, cutA);
+    if (!any) return false;
+    const T = THICK;
+    for (let j = i; j < e; j++) {
+      const s0 = j * CELL - (j === i ? ea : 0), s1 = (j + 1) * CELL + (j === e - 1 ? eb : 0);
+      const c0 = opt.cut(salt, line, j, cutA) ? Math.max(s0, cutA[0]) : s1, c1 = Math.min(s1, cutA[1]);
+      if (c1 - c0 < 1e-3) { B(s0, s1, 0, H); continue; }
+      B(s0, c0, 0, H); B(c1, s1, 0, H);
+      const yAt = (a) => Math.max(0, cutA[2] + (cutA[3] - cutA[2]) * (a - cutA[0]) / (cutA[1] - cutA[0]));
+      let lo0 = c0, lo1 = c1;                          // the part where the cut is below the ceiling
+      const ya = yAt(c0), yb = yAt(c1);
+      if (ya >= H && yb >= H) continue;
+      if (ya >= H) lo0 = c0 + (H - ya) / (yb - ya) * (c1 - c0);
+      if (yb >= H) lo1 = c0 + (H - ya) / (yb - ya) * (c1 - c0);
+      const y0c = Math.min(H, yAt(lo0)), y1c = Math.min(H, yAt(lo1)), ta = lo1 - lo0, ty = y1c - y0c, tl = Math.hypot(ta, ty);
+      Q(lo0, -T, y0c, lo1, -T, y1c, lo1, -T, H, lo0, -T, H, 0, -1, 0, 2);
+      Q(lo0, T, y0c, lo1, T, y1c, lo1, T, H, lo0, T, H, 0, 1, 0, 2);
+      Q(lo0, -T, y0c, lo1, -T, y1c, lo1, T, y1c, lo0, T, y0c, ty / tl, 0, -ta / tl, 2);
+    }
+    return true;
+  };
   const SUB = 6, ds = new Float64Array(5);
   for (const [salt, ext] of [[SALT_H, x0], [SALT_V, z0]]) {
     hor = salt === SALT_H;
@@ -358,6 +386,7 @@ export function buildChunk(seed, cx, cz, out, opt = {}) {
         const A = bow(seed, salt, line, i);
         let e = i; while (e < a1 && lineKind(seed, salt, line, e) === 1) e++;
         const ea = wallLike(lineKind(seed, salt, line, i - 1)) ? 0 : THICK, eb = wallLike(lineKind(seed, salt, line, e)) ? 0 : THICK;
+        if (A === 0 && opt.cut && cutRun(salt, line, i, e, ea, eb)) { i = e; continue; }
         if (A === 0) B(i * CELL - ea, e * CELL + eb, 0, H);
         else if (bowLean) B(i * CELL - ea, e * CELL + eb, 0, H, A);
         else {                               // bowed: SUB slices per edge, smooth normals

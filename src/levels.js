@@ -42,10 +42,15 @@ const calm = (seed, lv, x, z) => { const t = roomCell(levelSeed(seed, lv), x, z)
 export const stairAt = (seed, lv, x, z) => S2(seed, lv, x, z) && !calm(seed, lv, x, z) && !calm(seed, lv + 1, x, z) && openTo(seed, lv + 1, x, z);
 export const dropAt = (seed, lv, x, z) => D(seed, lv, x, z) && !S(seed, lv, x, z) && !S(seed, lv - 1, x, z) && !calm(seed, lv, x, z) && !calm(seed, lv - 1, x, z) && openTo(seed, lv - 1, x, z);
 
-// Stair in cell (x, z) of level lv, written into st: [dx, dz, half width, steps, open0, variant].
+// Stair in cell (x, z) of level lv, written into st: [dx, dz, half width, steps, open0, variant,
+// off, clip, sink, cut].
 // It climbs FH over RUN metres along (dx, dz), centred in the cell. Variants: 0 normal, 1 a few
 // giant steps, 2 lots of tiny ones, 3 very narrow, 4 very wide, 5 a stairwell so low you must crouch.
 // open0: where along the run (0..1) the stairwell opening in the ceiling starts.
+// Further out some go wrong (more of them with mutation): off shifts the stair sideways so it runs
+// into the wall beside it (cut 1: the wall has been cut away round it, 0: the steps just pass through);
+// clip 1: no opening above, the stair climbs into the ceiling and goes nowhere; clip 2: the whole stair
+// is sunk sink metres into the floor (you can still step off the top).
 export const RUN = 2.3;
 export function stairShape(seed, lv, x, z, st) {
   const h = hashU(seed, 930 + lv * 31, x, z), d = h & 3, v = (h >>> 2) % 6;
@@ -55,14 +60,24 @@ export function stairShape(seed, lv, x, z, st) {
   const rise = FH / st[3], clear = v === 5 ? 1.6 : 1.0;  // ground height you may reach under the ceiling
   st[4] = Math.max(0.1, Math.floor(clear / rise) / st[3] - 0.03);
   st[5] = v;
+  st[6] = st[7] = st[8] = st[9] = 0;
+  const f = mutation(lv, x, z) / 8, c = hashU(seed, 935 + lv * 31, x, z), rc = unit(c);
+  const pSide = 0.03 + 0.3 * f, pCeil = 0.02 + 0.12 * f, pSunk = 0.02 + 0.15 * f;
+  if (rc < pSide) {
+    st[6] = ((c & 1) ? 1 : -1) * Math.max(0, CELL / 2 - st[2] + 0.05 + 0.4 * unit(hashU(seed, 936 + lv * 31, x, z)));
+    st[9] = (c >>> 1) & 1;
+  } else if (rc < pSide + pCeil) st[7] = 1;
+  else if (rc < pSide + pCeil + pSunk) { st[7] = 2; st[8] = 0.15 + 0.4 * unit(hashU(seed, 937 + lv * 31, x, z)); }
   return st;
 }
 // opening rect of a stairwell (ceiling of lv, floor of lv + 1)
+// (shifted with the stair, and cut off at the cell's edges: past them the stair runs into the floor above)
 function wellRect(x, z, st, r) {
-  const cx = (x + 0.5) * CELL, cz = (z + 0.5) * CELL, w = st[2] + 0.1;
+  const cx = (x + 0.5) * CELL - st[1] * st[6], cz = (z + 0.5) * CELL + st[0] * st[6], w = st[2] + 0.1;
   const a = -RUN / 2 + st[4] * RUN, b = RUN / 2;          // along the run
   if (st[0] !== 0) { const p = cx + st[0] * a, q = cx + st[0] * b; r[0] = Math.min(p, q); r[2] = Math.max(p, q); r[1] = cz - w; r[3] = cz + w; }
   else { const p = cz + st[1] * a, q = cz + st[1] * b; r[1] = Math.min(p, q); r[3] = Math.max(p, q); r[0] = cx - w; r[2] = cx + w; }
+  r[0] = Math.max(r[0], x * CELL); r[1] = Math.max(r[1], z * CELL); r[2] = Math.min(r[2], (x + 1) * CELL); r[3] = Math.min(r[3], (z + 1) * CELL);
   return r;
 }
 function dropRect(seed, lv, x, z, r) {
@@ -72,10 +87,10 @@ function dropRect(seed, lv, x, z, r) {
   r[0] = cx - hx; r[1] = cz - hz; r[2] = cx + hx; r[3] = cz + hz;
   return r;
 }
-const stH = new Float64Array(6);
+const stH = new Float64Array(10);
 // opening in the floor of level lv at cell (x, z): a drop hole, or the top of a stairwell from below
 export function floorHole(seed, lv, x, z, r) {
-  if (stairAt(seed, lv - 1, x, z)) { wellRect(x, z, stairShape(seed, lv - 1, x, z, stH), r); return true; }
+  if (stairAt(seed, lv - 1, x, z) && stairShape(seed, lv - 1, x, z, stH)[7] !== 1) { wellRect(x, z, stH, r); return true; }
   if (pitAt(seed, lv, x, z)) { r[0] = x * CELL + PIT_EDGE; r[1] = z * CELL + PIT_EDGE; r[2] = (x + 1) * CELL - PIT_EDGE; r[3] = (z + 1) * CELL - PIT_EDGE; return true; }
   if (dropAt(seed, lv, x, z)) { dropRect(seed, lv, x, z, r); return true; }
   return false;
@@ -87,6 +102,24 @@ function pitAt(seed, lv, x, z) {
     && openTo(seed, lv - 1, x, z);
 }
 export const ceilHole = (seed, lv, x, z, r) => floorHole(seed, lv + 1, x, z, r);
+// a stair pushed sideways into the wall on one of its cell's edges, with the wall cut away round it
+// (gen.js cutRun): out = [a0, a1, y0, y1] along that edge, the cut line 1.2 m above the nosings (a slot over the rail)
+const stC = new Float64Array(10);
+function stairCut(seed, lv, salt, line, i, out) {
+  for (const sg of [1, -1]) {                       // the cell on the - side (edge on its + side), then the + side
+    const cx = salt === SALT_H ? i : sg > 0 ? line - 1 : line, cz = salt === SALT_H ? (sg > 0 ? line - 1 : line) : i;
+    if (!stairAt(seed, lv, cx, cz)) continue;
+    stairShape(seed, lv, cx, cz, stC);
+    if (stC[6] === 0 || !stC[9]) continue;
+    const runsX = stC[0] !== 0, ps = Math.sign(stC[6]) * (runsX ? stC[0] : -stC[1]);   // which way it sticks out, across
+    if (runsX !== (salt === SALT_H) || ps !== sg) continue;
+    const d = runsX ? stC[0] : stC[1], c = ((runsX ? cx : cz) + 0.5) * CELL, ya = 1.2 - stC[8], yb = FH + 1.2 - stC[8];
+    const p = c - d * RUN / 2, q = c + d * RUN / 2;
+    if (p < q) { out[0] = p; out[1] = q; out[2] = ya; out[3] = yb; } else { out[0] = q; out[1] = p; out[2] = yb; out[3] = ya; }
+    return true;
+  }
+  return false;
+}
 // pool room: every cell but the outer ring is the drained pool, POOL_D below the floor
 export const POOL_D = 0.55;
 export function poolAt(seed, lv, x, z) {
@@ -194,12 +227,12 @@ export function groundAt(seed, lv, px, pz) {
   for (let l = lv; l > lv - 4; l--) {
     if (stairAt(seed, l, x, z)) {
       stairShape(seed, l, x, z, stH);
-      const cx = (x + 0.5) * CELL, cz = (z + 0.5) * CELL;
+      const cx = (x + 0.5) * CELL - stH[1] * stH[6], cz = (z + 0.5) * CELL + stH[0] * stH[6];
       const along = (stH[0] !== 0 ? (px - cx) * stH[0] : (pz - cz) * stH[1]) + RUN / 2;
       const across = Math.abs(stH[0] !== 0 ? pz - cz : px - cx);
       if (along >= 0 && along <= RUN && across <= stH[2]) {
         const i = Math.min(stH[3] - 1, Math.floor(along / RUN * stH[3]));
-        return l * FH + (i + 1) * FH / stH[3];
+        return l * FH + Math.max(0, (i + 1) * FH / stH[3] - stH[8]);
       }
     }
     if (!(floorHole(seed, l, x, z, rH) && inRect(rH, px, pz))) return l * FH - (poolAt(seed, l, x, z) ? POOL_D : 0);
@@ -299,6 +332,43 @@ export function collideProps(seed, lv, pos, r, hy = 0) {
       for (let k = 0; k < 6; k += 3) if (c[k + 2] > 0) pushCircle(pos, r, c[k], c[k + 1], c[k + 2]);
     }
     furnish(seed, lv, x, z, solidOf);
+    if (stairAt(seed, lv, x, z)) stairSolid(seed, lv, x, z, false, pos, r, hy, cx, cz);
+    if (stairAt(seed, lv - 1, x, z)) stairSolid(seed, lv - 1, x, z, true, pos, r, hy, cx, cz);
+  }
+}
+function pushSeg(pos, r, ax, az, bx, bz) {
+  const ex = bx - ax, ez = bz - az, t = Math.max(0, Math.min(1, ((pos[0] - ax) * ex + (pos[1] - az) * ez) / (ex * ex + ez * ez || 1)));
+  pushCircle(pos, r, ax + ex * t, az + ez * t, 0);
+}
+function pushRect(pos, r, x0, z0, x1, z1) {
+  const qx = Math.max(x0, Math.min(x1, pos[0])), qz = Math.max(z0, Math.min(z1, pos[1]));
+  if (qx !== pos[0] || qz !== pos[1]) { pushCircle(pos, r, qx, qz, 0); return; }
+  const d = [pos[0] - x0, x1 - pos[0], pos[1] - z0, z1 - pos[1]], k = d.indexOf(Math.min(...d));   // inside: out the nearest side
+  if (k === 0) pos[0] = x0 - r; else if (k === 1) pos[0] = x1 + r; else if (k === 2) pos[1] = z0 - r; else pos[1] = z1 + r;
+}
+// a stair's handrails (you're on the stair's level) or the guard rail round its opening (you're upstairs),
+// and, for a stair pushed into the next cell, the part that sticks out there
+const stS = new Float64Array(10);
+function stairSolid(seed, l, x, z, upstairs, pos, r, hy, pcx, pcz) {
+  stairShape(seed, l, x, z, stS);
+  const [dx, dz, hw] = stS, px = -dz, pz = dx, off = stS[6];
+  const ox = (x + 0.5) * CELL + px * off, oz = (z + 0.5) * CELL + pz * off;
+  const P = (s, a) => [ox + dx * (s - RUN / 2) + px * a, oz + dz * (s - RUN / 2) + pz * a];
+  if (upstairs) {
+    if (stS[7] === 1 || hy > 1.05) return;
+    const gw = hw + 0.12, s0 = stS[4] * RUN - 0.02;
+    for (const [sa, aa, sb, ab] of [[s0, -gw, RUN, -gw], [s0, gw, RUN, gw], [s0, -gw, s0, gw]]) { const A = P(sa, aa), B = P(sb, ab); pushSeg(pos, r, A[0], A[1], B[0], B[1]); }
+    return;
+  }
+  if (hy > 2.3) return;
+  for (const sd of [-1, 1]) { const A = P(0.03, sd * (hw + 0.022)), B = P(RUN, sd * (hw + 0.022)); pushSeg(pos, r, A[0], A[1], B[0], B[1]); }
+  if (off !== 0 && (pcx !== x || pcz !== z)) {
+    const A = P(0, -hw - 0.045), B = P(RUN, hw + 0.045);
+    let x0 = Math.min(A[0], B[0]), x1 = Math.max(A[0], B[0]), z0 = Math.min(A[1], B[1]), z1 = Math.max(A[1], B[1]);
+    const X0 = x * CELL, X1 = X0 + CELL, Z0 = z * CELL, Z1 = Z0 + CELL;
+    if (dx !== 0) { if (z1 > Z1) z0 = Z1; else if (z0 < Z0) z1 = Z0; else return; }
+    else { if (x1 > X1) x0 = X1; else if (x0 < X0) x1 = X0; else return; }
+    pushRect(pos, r, x0, z0, x1, z1);
   }
 }
 
@@ -417,6 +487,7 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     floorHole: (x, z, r) => floorHole(seed, lv, x, z, r) || (poolAt(seed, lv, x, z) && poolRect(x, z, r)),
     ceilHole: (x, z, r) => ceilHole(seed, lv, x, z, r),
     light: (x, z) => cellLight(seed, lv, x, z),
+    cut: (salt, line, i, out) => stairCut(seed, lv, salt, line, i, out),
   }) * FLOATS;
   const V = (x, y, z, nx, ny, nz, m) => { if (n + FLOATS > out.length) return; out[n] = x; out[n + 1] = y; out[n + 2] = z; out[n + 3] = nx; out[n + 4] = ny; out[n + 5] = nz; out[n + 6] = m; n += FLOATS; };
   const Q = (a, b, c, d, nx, ny, nz, m) => { V(...a, nx, ny, nz, m); V(...b, nx, ny, nz, m); V(...c, nx, ny, nz, m); V(...a, nx, ny, nz, m); V(...c, nx, ny, nz, m); V(...d, nx, ny, nz, m); };
@@ -650,7 +721,7 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     else if (type === ITEM_PILLAR) OB([px, y0 + (py + HEIGHT) / 2, pz], [0.25, (HEIGHT - py) / 2, 0.25], R, 2);
     else desk(o, R);
   };
-  const st = new Float64Array(6), r = new Float64Array(4), p = new Float64Array(4);
+  const st = new Float64Array(10), r = new Float64Array(4), p = new Float64Array(4);
   const LG = new Float64Array(7), pL = new Float64Array(4), rL = new Float64Array(4), RD = new Float64Array(9), I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
   let hungN = 0;
   const x0 = cx * CHUNK, z0 = cz * CHUNK, MAX_BUNDLES = 8;
@@ -665,19 +736,63 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
       Q([r[0], ya, r[1]], [r[0], ya, r[3]], [r[0], yb, r[3]], [r[0], yb, r[1]], 1, 0, 0, 11);
       Q([r[2], ya, r[1]], [r[2], ya, r[3]], [r[2], yb, r[3]], [r[2], yb, r[1]], -1, 0, 0, 11);
     }
-    // stairs: n solid steps, carpet on the treads
+    // ---- stairs: carpeted treads with black rubber nosings, painted risers, papered side panels that
+    // follow the slope, a wooden handrail on metal balusters; a guard rail round the opening upstairs ----
     if (stairAt(seed, lv, x, z)) {
       stairShape(seed, lv, x, z, st);
-      const [dx, dz, hw, N] = st, px = -dz, pz = dx, rise = FH / N;
-      const at = (s, a, y) => [mx + dx * (s - RUN / 2) + px * a, y0 + y, mz + dz * (s - RUN / 2) + pz * a];
+      const [dx, dz, hw, N] = st, px = -dz, pz = dx, rise = FH / N, g = RUN / N, off = st[6], sink = st[8];
+      const ox = mx + px * off, oz = mz + pz * off, yb = y0 - sink;
+      const at = (s, a, y) => [ox + dx * (s - RUN / 2) + px * a, yb + y, oz + dz * (s - RUN / 2) + pz * a];
+      const Rs = rot(Math.atan2(dx, -dz));               // local z = -run direction, x = across (to match at())
+      const box = (s, a, y, hs, ha, hy, m, b, skip = 0) => RB(at(s, a, y), [ha, hy, hs], Rs, m, b, skip);
+      const nose = Math.min(0.035, g * 0.35);
       for (let i = 0; i < N; i++) {
-        const s0 = RUN * i / N, s1 = RUN * (i + 1) / N, y = rise * (i + 1);
-        Q(at(s0, -hw, y), at(s0, hw, y), at(s1, hw, y), at(s1, -hw, y), 0, 1, 0, 0);
-        Q(at(s0, -hw, y - rise), at(s0, hw, y - rise), at(s0, hw, y), at(s0, -hw, y), -dx, 0, -dz, 11);
-        Q(at(s0, -hw, 0), at(s1, -hw, 0), at(s1, -hw, y), at(s0, -hw, y), -px, 0, -pz, 11);
-        Q(at(s0, hw, 0), at(s1, hw, 0), at(s1, hw, y), at(s0, hw, y), px, 0, pz, 11);
+        const s0 = g * i, s1 = g * (i + 1), y = rise * (i + 1);
+        Q(at(s0, -hw, y), at(s0, hw, y), at(s1, hw, y), at(s1, -hw, y), 0, 1, 0, 0);                    // tread (carpet)
+        Q(at(s0, -hw, y - rise), at(s0, hw, y - rise), at(s0, hw, y - 0.02), at(s0, -hw, y - 0.02), -dx, 0, -dz, 16);   // riser
+        box(s0 + nose * 0.3, 0, y - 0.011, nose, hw, 0.0125, 14, Math.min(0.009, nose * 0.5));          // nosing
       }
-      Q(at(RUN, -hw, 0), at(RUN, hw, 0), at(RUN, hw, FH), at(RUN, -hw, FH), dx, 0, dz, 11);
+      // side panels: from the floor up to just above the nosings, flat once they reach the floor above
+      const lineY = (sv) => Math.min(FH, sv / RUN * FH + rise + 0.07), sF = Math.min(RUN, (FH - rise - 0.07) / FH * RUN);
+      for (const sd of [-1, 1]) {
+        const a0 = sd * hw, a1 = sd * (hw + 0.045), n = sd;
+        for (const [sa, sb] of [[-0.02, sF], [sF, RUN]]) {
+          if (sb - sa < 1e-3) continue;
+          const ya = lineY(Math.max(0, sa)), ybb = lineY(sb);
+          Q(at(sa, a1, 0), at(sb, a1, 0), at(sb, a1, ybb), at(sa, a1, ya), px * n, 0, pz * n, 2);         // outside
+          Q(at(sa, a0, rise * 0), at(sb, a0, 0), at(sb, a0, ybb), at(sa, a0, ya), -px * n, 0, -pz * n, 2); // inside (above the treads)
+          const tl = Math.hypot(sb - sa, ybb - ya), ny = (sb - sa) / tl, ns = -(ybb - ya) / tl;
+          Q(at(sa, a0, ya), at(sb, a0, ybb), at(sb, a1, ybb), at(sa, a1, ya), dx * ns, ny, dz * ns, 16);    // cap
+        }
+        Q(at(-0.02, a0, 0), at(-0.02, a1, 0), at(-0.02, a1, lineY(0)), at(-0.02, a0, lineY(0)), -dx, 0, -dz, 16);
+      }
+      Q(at(RUN, -hw - 0.045, 0), at(RUN, hw + 0.045, 0), at(RUN, hw + 0.045, FH), at(RUN, -hw - 0.045, FH), dx, 0, dz, 2);   // back
+      // handrails: a newel post at the foot, balusters on the side panels, the rail 0.9 m above the nosings
+      const railY = (sv) => sv / RUN * FH + rise + 0.9;
+      for (const sd of [-1, 1]) {
+        const ar = sd * (hw + 0.022);
+        CYL(at(0.03, ar, 0), at(0.03, ar, railY(0.03) + 0.06), 0.032, 15, 8, 2);
+        SPH(at(0.03, ar, railY(0.03) + 0.075), [0.042, 0.042, 0.042], I3, 15, 4, 8);
+        const nb = Math.max(2, Math.round(RUN / 0.16));
+        for (let k = 1; k < nb; k++) { const sv = RUN * k / nb; CYL(at(sv, ar, lineY(sv)), at(sv, ar, railY(sv)), 0.009, 6, 6); }
+        CYL(at(0.03, ar, railY(0.03)), at(RUN, ar, railY(RUN)), 0.026, 15, 8);
+        if (st[7] !== 1) {                     // a newel post at the top too, standing on the floor above
+          CYL(at(RUN - 0.03, ar, FH), at(RUN - 0.03, ar, railY(RUN) + 0.06), 0.032, 15, 8, 2);
+          SPH(at(RUN - 0.03, ar, railY(RUN) + 0.075), [0.042, 0.042, 0.042], I3, 15, 4, 8);
+        }
+      }
+      // upstairs: a guard rail along both sides and across the far end of the opening
+      if (st[7] !== 1) {
+        wellRect(x, z, st, r);
+        const yU = y0 + FH, gw = hw + 0.12, s0 = st[4] * RUN - 0.02;
+        const post = (sv, a) => { const p0 = at(sv, a, 0); CYL([p0[0], yU, p0[2]], [p0[0], yU + 1.04, p0[2]], 0.022, 6, 8, 2); };
+        const rail = (sa, aa, sb, ab, h, rr) => { const p0 = at(sa, aa, 0), p1 = at(sb, ab, 0); CYL([p0[0], yU + h, p0[2]], [p1[0], yU + h, p1[2]], rr, 6, 8); };
+        for (const [sa, aa, sb, ab] of [[s0, -gw, RUN, -gw], [s0, gw, RUN, gw], [s0, -gw, s0, gw]]) {
+          rail(sa, aa, sb, ab, 1.02, 0.022); rail(sa, aa, sb, ab, 0.5, 0.012);
+          const n = Math.max(1, Math.round(Math.hypot(sb - sa, ab - aa) / 1.1));
+          for (let k = 0; k <= n; k++) post(sa + (sb - sa) * k / n, aa + (ab - aa) * k / n);
+        }
+      }
     }
     // ---- the pool: tiled basin walls where the next cell isn't pool, a drain, a ladder ----
     if (poolAt(seed, lv, x, z)) {
