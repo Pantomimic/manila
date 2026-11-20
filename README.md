@@ -7,7 +7,7 @@ wallpaper, damp carpet, and the hum of fluorescent lights that never quite stop 
 seed is a different building, and it goes on forever in every direction, including up and down.
 
 Everything, from the walls to the sound, is generated in code from one number. There are no
-textures, models or recordings. The whole game is a single HTML file of about 100 kB.
+textures, models or recordings. The whole game is a single HTML file of about 115 kB.
 
 **Play it:** [pantomimic.itch.io/manila](https://pantomimic.itch.io/manila) (needs WebGPU).
 

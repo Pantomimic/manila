@@ -133,6 +133,8 @@ const inRect = (r, px, pz) => px > r[0] && px < r[2] && pz > r[1] && pz < r[3];
 // light kind of a cell, with panels removed where the ceiling is open
 export function cellLight(seed, lv, x, z) {
   if (ceilHole(seed, lv, x, z, rH)) return 0;
+  const egg = eggAt(seed, lv, x, z);
+  if (egg === EGG_BENCH) return 4;                   // the lamp post's globe (lightGeom puts the light there)
   const sL = levelSeed(seed, lv);
   const t = roomCell(sL, x, z);
   if (t === 4)                                  // dark room: one flickering panel in the middle
@@ -141,6 +143,47 @@ export function cellLight(seed, lv, x, z) {
   return lightKind(sL, x, z);
 }
 
+// ---- colours by number: a material id >= 100 carries its own colour (5 bits each of r, g, b), and
+// + 65536 makes it glossy. The shader unpacks it in one branch instead of one branch per colour.
+export const PAL = (r, g, b, gloss = 0) => 100 + (Math.round(r * 31) << 10 | Math.round(g * 31) << 5 | Math.round(b * 31)) + (gloss ? 65536 : 0);
+
+// ---- one-offs: things that turn up once in a whole building ----
+// Each is in one cell of level 0, somewhere between EGG_NEAR and EGG_FAR cells from the start, at a spot
+// that is ordinary floor (no room, stair, hole or wrong object). 0: a park bench under a lamp post on a
+// patch of grass.
+export const EGG_BENCH = 0, EGGS = 1;
+const EGG_NEAR = [25], EGG_FAR = [80], eggCache = new Map();
+function eggCells(seed) {
+  let e = eggCache.get(seed);
+  if (e) return e;
+  e = [];
+  for (let k = 0; k < EGGS; k++) {
+    const a = unit(hashU(seed, 991 + k, 0, 0)) * 2 * Math.PI, d = EGG_NEAR[k] + (EGG_FAR[k] - EGG_NEAR[k]) * unit(hashU(seed, 993 + k, 0, 0));
+    const bx = Math.round(Math.cos(a) * d), bz = Math.round(Math.sin(a) * d);
+    let found = null;
+    for (let r = 0; r < 14 && !found; r++) for (let dz = -r; dz <= r && !found; dz++) for (let dx = -r; dx <= r && !found; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+      const x = bx + dx, z = bz + dz;
+      if (e.some((c) => Math.abs(c[0] - x) < 3 && Math.abs(c[1] - z) < 3)) continue;
+      if (roomCell(seed, x, z) >= 0 || stairAt(seed, 0, x, z) || stairAt(seed, -1, x, z) || stairAt(seed, 1, x, z)) continue;
+      if (floorHole(seed, 0, x, z, rE) || ceilHole(seed, 0, x, z, rE) || floorHole(seed, 2, x, z, rE) || propAt(seed, 0, x, z)[0] >= 0 || propAt(seed, 1, x, z)[0] >= 0) continue;
+      found = [x, z];
+    }
+    e.push(found || [1e9, 1e9]);
+  }
+  eggCache.set(seed, e);
+  return e;
+}
+const rE = new Float64Array(4);
+let eggBusy = false;                                 // (eggCells' own checks must not look for eggs)
+export function eggAt(seed, lv, x, z) {
+  if (lv !== 0 || eggBusy) return -1;
+  eggBusy = true;
+  const e = eggCells(seed);
+  eggBusy = false;
+  for (let k = 0; k < EGGS; k++) if (e[k][0] === x && e[k][1] === z) return k;
+  return -1;
+}
 // ---- where a cell's light panel is, and how a hanging one hangs ----
 // lightGeom fills out: [ox, oz, hx, hz, lx, ly, lz]: the panel's rectangle in the ceiling (centre
 // offset from the cell centre, half sizes), and where its light comes from (offset from the cell
@@ -173,6 +216,10 @@ export function lightGeom(seed, lv, x, z, kind, out) {
   out[0] = ox; out[1] = oz; out[2] = hx; out[3] = hz;
   out[4] = ox; out[5] = HEIGHT - 0.05; out[6] = oz;
   hang.v = -1;
+  if (kind === 4 && eggAt(seed, lv, x, z) === EGG_BENCH) {   // no panel at all; the light is the lamp's globe
+    out[0] = out[1] = 0; out[2] = out[3] = 0.0005; out[4] = -0.9; out[5] = 2.36; out[6] = -0.6;
+    return out;
+  }
   if (kind !== 4) return out;
   const h = hashU(sL, 346, x, z), u1 = unit(hashU(sL, 347, x, z)), r = unit(h);
   const v = r < 0.35 ? 0 : r < 0.6 ? 1 : r < 0.8 ? 2 : 3;
@@ -354,8 +401,16 @@ export function collideProps(seed, lv, pos, r, hy = 0) {
       for (let k = 0; k < 6; k += 3) if (c[k + 2] > 0) pushCircle(pos, r, c[k], c[k + 1], c[k + 2]);
     }
     furnish(seed, lv, x, z, solidOf);
+    if (lv === 0 && eggAt(seed, 0, x, z) >= 0) eggSolid(seed, lv, x, z, pos, r, hy);
     if (stairAt(seed, lv, x, z)) stairSolid(seed, lv, x, z, false, pos, r, hy, cx, cz);
     if (stairAt(seed, lv - 1, x, z)) stairSolid(seed, lv - 1, x, z, true, pos, r, hy, cx, cz);
+  }
+}
+// the bench and lamp post
+function eggSolid(seed, lv, x, z, pos, r, hy) {
+  const k = eggAt(seed, 0, x, z), mx = (x + 0.5) * CELL, mz = (z + 0.5) * CELL;
+  if (k === EGG_BENCH && lv === 0 && hy < 0.9) {
+    pushCircle(pos, r, mx + 0.25, mz + 0.15, 0.55); pushCircle(pos, r, mx - 0.9, mz - 0.6, 0.12);
   }
 }
 function pushSeg(pos, r, ax, az, bx, bz) {
@@ -638,6 +693,80 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     for (let j = 1; j <= seg; j++) {
       const t = j / seg, q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t - sag * 4 * t * (1 - t), a[2] + (b[2] - a[2]) * t];
       CYL(p, q, r, m, ring); p = q;
+    }
+  };
+  // ---- trash, and things from outside that have ended up in here (more of both, and more outside
+  // things, further out); now and then something is half in the floor or half through a wall ----
+  const trash = (x, z, mx, mz) => {
+    const t = roomCell(sL, x, z);
+    if (t === 1 || t === 2 || t === 8 || t === 9 || t >= 10) return;               // furnished rooms, pool, hallway, follow, closet
+    const f = mutation(lv, x, z) / 8, h = hashU(sL, 1001, x, z);
+    if (unit(h) >= 0.025 + 0.18 * f) return;
+    if (stairAt(seed, lv, x, z) || floorHole(seed, lv, x, z, rL) || propAt(seed, lv, x, z, pL)[0] >= 0) return;
+    const n = 1 + h % 3;
+    for (let j = 0; j < n; j++) {
+      const hj = hashU(sL, 1002 + j, x, z), r1 = unit(hj), r2 = unit(hashU(sL, 1005 + j, x, z)), r3 = unit(hashU(sL, 1008 + j, x, z));
+      const px2 = mx + (r2 - 0.5) * 2.2, pz2 = mz + (r3 - 0.5) * 2.2, yaw = r1 * 40, Ry = rot(yaw), o = [px2, y0, pz2];
+      const outside = unit(hashU(sL, 1011 + j, x, z)) < 0.12 + 0.5 * f;
+      const ty = outside ? [6, 7, 9, 11, 5][hj % 5] : [0, 1, 2, 3, 4, 8, 0, 1][hj % 8];
+      const sunk = outside && (hj >>> 8) % 4 === 0 ? 0.15 + 0.35 * r1 : 0;                  // half in the floor
+      if (ty === 0) for (let k = 0; k < 1 + hj % 4; k++) {                                   // crumpled paper
+        const kk = hashU(sL, 1020 + k, x, z), a = unit(kk) * 6.28, d = 0.15 * k;
+        SPH([px2 + Math.cos(a) * d, y0 + 0.035, pz2 + Math.sin(a) * d], [0.045, 0.036, 0.04], rot(a), PAL(0.86, 0.85, 0.79), 3, 5);
+      } else if (ty === 1) {                                                                 // a can on its side
+        const cc = [PAL(0.6, 0.05, 0.04, 1), PAL(0.08, 0.15, 0.5, 1), PAL(0.1, 0.4, 0.12, 1), PAL(0.62, 0.62, 0.64, 1)][hj % 4];
+        CYL(loc(Ry, o, [-0.06, 0.033, 0]), loc(Ry, o, [0.06, 0.033, 0]), 0.033, cc, 10, 0);
+        for (const e of [-1, 1]) CYL(loc(Ry, o, [e * 0.06, 0.033, 0]), loc(Ry, o, [e * 0.066, 0.033, 0]), 0.033, 6, 10, e > 0 ? 2 : 1, 0.027);
+      } else if (ty === 2) {                                                                 // a paper coffee cup, standing or knocked over
+        const R2 = r3 < 0.5 ? Ry : rot(yaw, 1.45), b0 = r3 < 0.5 ? 0 : 0.04;
+        CYL(loc(R2, o, [0, b0, 0]), loc(R2, o, [0, b0 + 0.12, 0]), 0.029, PAL(0.88, 0.87, 0.82), 12, 1, 0.042);
+        CYL(loc(R2, o, [0, b0 + 0.12, 0]), loc(R2, o, [0, b0 + 0.135, 0]), 0.044, r2 < 0.5 ? 14 : PAL(0.9, 0.9, 0.88), 12, 2, 0.04);
+      } else if (ty === 3) {                                                                 // a fast food bag, top rolled over
+        RB(loc(Ry, o, [0, 0.11, 0]), [0.09, 0.11, 0.055], Ry, PAL(0.55, 0.4, 0.22), 0.01);
+        RB(loc(Ry, o, [0, 0.235, 0.01]), [0.088, 0.018, 0.05], tiltX(Ry, 0.3), PAL(0.5, 0.36, 0.2), 0.012);
+      } else if (ty === 4) {                                                                 // a newspaper, opened out
+        RB([px2, y0 + 0.004, pz2], [0.2, 0.004, 0.29], Ry, PAL(0.78, 0.77, 0.72), 0.002);
+        RB([px2 + 0.12, y0 + 0.01, pz2 + 0.05], [0.2, 0.003, 0.29], rot(yaw + 0.4, 0, 0.04), PAL(0.74, 0.73, 0.69), 0.002);
+      } else if (ty === 8) {                                                                 // a plastic bag
+        SPH([px2, y0 + 0.05, pz2], [0.15, 0.055, 0.11], Ry, PAL(0.82, 0.82, 0.8), 4, 6);
+        SPH([px2 + 0.1, y0 + 0.03, pz2 + 0.06], [0.06, 0.025, 0.04], Ry, PAL(0.82, 0.82, 0.8), 3, 5);
+      } else if (ty === 5) for (let k = 0; k < 14; k++) {                                    // dead leaves
+        const kk = hashU(sL, 1040 + k, x, z), a = unit(kk) * 6.28, d = 0.6 * unit(hashU(sL, 1060 + k, x, z));
+        const leaf = [PAL(0.55, 0.25, 0.04), PAL(0.4, 0.16, 0.03), PAL(0.6, 0.45, 0.08), PAL(0.3, 0.17, 0.06)][kk & 3];
+        RB([px2 + Math.cos(a) * d, y0 + 0.003 + k * 0.0003, pz2 + Math.sin(a) * d], [0.035, 0.002, 0.022], rot(a * 3), leaf, 0.001);
+      } else if (ty === 6) {                                                                 // a traffic cone, maybe knocked over or sunk
+        const down = r3 < 0.35, R2 = down ? rot(yaw, 1.3) : Ry, b = down ? [0, 0.17, 0] : [0, -sunk, 0];
+        const org = PAL(0.8, 0.2, 0.02), P = (q) => loc(R2, o, [q[0] + b[0], q[1] + b[1], q[2] + b[2]]);
+        if (!down) RB([px2, y0 + 0.02 - sunk, pz2], [0.19, 0.02, 0.19], Ry, PAL(0.25, 0.06, 0.01), 0.01);
+        CYL(P([0, 0.03, 0]), P([0, 0.4, 0]), 0.15, org, 12, 0, 0.083);
+        CYL(P([0, 0.4, 0]), P([0, 0.52, 0]), 0.083, PAL(0.88, 0.88, 0.86, 1), 12, 0, 0.06);
+        CYL(P([0, 0.52, 0]), P([0, 0.72, 0]), 0.06, org, 12, 2, 0.022);
+      } else if (ty === 7) {                                                                 // a tyre: lying flat, or half through a wall
+        const sd = hj & 3, wall = sd < 2 ? wallLike(kindH(sL, x, z + sd)) : wallLike(kindV(sL, x + sd - 2, z));
+        if (wall && r3 < 0.6) {
+          const hy = 0.35 + 1.2 * r1, along = (r2 - 0.5) * 2;
+          const c2 = sd < 2 ? [mx + along, y0 + hy, (z + sd) * CELL] : [(x + sd - 2) * CELL, y0 + hy, mz + along];
+          const ax = sd < 2 ? [0, 0, 0.11] : [0.11, 0, 0];
+          CYL([c2[0] - ax[0], c2[1], c2[2] - ax[2]], [c2[0] + ax[0], c2[1], c2[2] + ax[2]], 0.33, 14, 16, 3);
+        } else {
+          CYL([px2, y0 - sunk, pz2], [px2, y0 + 0.2 - sunk, pz2], 0.33, 14, 16, 2);
+          CYL([px2, y0 + 0.2 - sunk, pz2], [px2, y0 + 0.202 - sunk, pz2], 0.19, PAL(0.02, 0.02, 0.02), 12, 2);
+        }
+      } else if (ty === 9) {                                                                 // a slab of road coming up through the carpet
+        const asph = PAL(0.1, 0.1, 0.1), Rr = rot(yaw, (r3 - 0.5) * 0.08, (r2 - 0.5) * 0.08);
+        RB([px2, y0 + 0.01, pz2], [0.75, 0.03, 0.5], Rr, asph, 0.02);
+        RB(loc(Rr, [px2, y0 + 0.01, pz2], [0.35, 0.0, 0.25]), [0.45, 0.032, 0.35], Rr, PAL(0.13, 0.12, 0.11), 0.02);
+        for (let k = 0; k < 2; k++) RB(loc(Rr, [px2, y0 + 0.042, pz2], [-0.45 + k * 0.7, 0, 0]), [0.22, 0.002, 0.05], Rr, PAL(0.75, 0.6, 0.08), 0.002);
+        RB(loc(Rr, [px2, y0, pz2], [0, 0.06, -0.55]), [0.8, 0.07, 0.07], Rr, 11, 0.02);       // kerb
+      } else if (ty === 11) {                                                                // a fire hydrant, half sunk
+        const red = PAL(0.62, 0.08, 0.05, 1), yb2 = y0 - sunk;
+        CYL([px2, yb2, pz2], [px2, yb2 + 0.08, pz2], 0.13, red, 12, 2);
+        CYL([px2, yb2 + 0.08, pz2], [px2, yb2 + 0.6, pz2], 0.1, red, 12, 0);
+        CYL([px2, yb2 + 0.6, pz2], [px2, yb2 + 0.64, pz2], 0.125, red, 12, 3);
+        SPH([px2, yb2 + 0.66, pz2], [0.1, 0.09, 0.1], I3, red, 4, 10);
+        for (const e of [-1, 1]) CYL(loc(Ry, [px2, yb2, pz2], [e * 0.1, 0.45, 0]), loc(Ry, [px2, yb2, pz2], [e * 0.18, 0.45, 0]), 0.045, red, 8, 2);
+        CYL(loc(Ry, [px2, yb2, pz2], [0, 0.42, 0.1]), loc(Ry, [px2, yb2, pz2], [0, 0.42, 0.19]), 0.06, red, 8, 2);
+      }
     }
   };
   // ---- furniture. Origins at the floor centre; a seat faces +z, a desk's user side is +z.
@@ -926,10 +1055,48 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
       SPH(P([0, 1.73, 0.035]), [0.08, 0.115, 0.095], tiltX(R, -0.3), 20, 6, 8);   // head, bowed slightly
       for (let v = n0; v < n; v += FLOATS) { out[v + 3] = mx; out[v + 4] = y0; out[v + 5] = mz; }   // feet, for the vertex shader
     }
+    // ---- one-offs ----
+    const egg = eggAt(seed, lv, x, z);
+    if (egg === EGG_BENCH) {
+      const grass = PAL(0.12, 0.24, 0.05), grass2 = PAL(0.2, 0.33, 0.07), wood = PAL(0.33, 0.19, 0.09), iron = PAL(0.05, 0.09, 0.06, 1);
+      for (let j = 0; j < 5; j++) {                                                     // turf, in rough overlapping pieces
+        const u1 = unit(hashU(sL, 1090 + j, x, z)), u2 = unit(hashU(sL, 1095 + j, x, z));
+        RB([mx + (u1 - 0.5) * 0.9, y0 + 0.01 + j * 0.0015, mz + (u2 - 0.5) * 0.7], [0.55 + 0.4 * u2, 0.01, 0.45 + 0.35 * u1], rot(u1 * 6), [grass, grass2, PAL(0.16, 0.22, 0.06)][j % 3], 0.02);
+      }
+      for (let j = 0; j < 3; j++) {                                                     // and earth where it's torn
+        const u1 = unit(hashU(sL, 1097 + j, x, z));
+        RB([mx + (u1 - 0.5) * 2.2, y0 + 0.006, mz + (unit(hashU(sL, 1099 + j, x, z)) - 0.5) * 1.8], [0.3, 0.008, 0.2], rot(u1 * 9), PAL(0.2, 0.13, 0.07), 0.01);
+      }
+      for (let j = 0; j < 70; j++) {                                                    // tufts
+        const u1 = unit(hashU(sL, 1100 + j, x, z)), u2 = unit(hashU(sL, 1180 + j, x, z));
+        const bx2 = mx + (u1 - 0.5) * 2.6, bz2 = mz + (u2 - 0.5) * 2.0;
+        CYL([bx2, y0 + 0.02, bz2], [bx2 + (u2 - 0.5) * 0.03, y0 + 0.06 + 0.06 * u1, bz2 + (u1 - 0.5) * 0.03], 0.008, j & 1 ? grass : grass2, 3, 0, 0.001);
+      }
+      const Rb = rot(0.15), bo = [mx + 0.25, y0, mz + 0.15];                           // the bench
+      for (let k = 0; k < 4; k++) RB(loc(Rb, bo, [0, 0.44, -0.2 + k * 0.12]), [0.75, 0.015, 0.045], Rb, wood, 0.008);
+      for (let k = 0; k < 3; k++) RB(loc(Rb, bo, [0, 0.6 + k * 0.13, -0.29 - k * 0.025]), [0.75, 0.045, 0.012], Rb, wood, 0.008);
+      for (const sx of [-0.62, 0.62]) {
+        RB(loc(Rb, bo, [sx, 0.21, -0.05]), [0.025, 0.21, 0.025], Rb, iron, 0.006);
+        RB(loc(Rb, bo, [sx, 0.21, 0.19]), [0.025, 0.21, 0.025], Rb, iron, 0.006);
+        RB(loc(Rb, bo, [sx, 0.42, 0.0]), [0.025, 0.02, 0.28], Rb, iron, 0.006);
+        RB(loc(Rb, bo, [sx, 0.66, -0.31]), [0.022, 0.24, 0.02], tiltX(Rb, 0.15), iron, 0.006);
+      }
+      const lx = mx - 0.9, lz = mz - 0.6;                                               // the lamp post
+      CYL([lx, y0, lz], [lx, y0 + 0.12, lz], 0.1, iron, 10, 2, 0.07);
+      CYL([lx, y0 + 0.12, lz], [lx, y0 + 2.18, lz], 0.045, iron, 10, 0, 0.035);
+      CYL([lx, y0 + 2.18, lz], [lx, y0 + 2.22, lz], 0.08, iron, 10, 3);
+      SPH([lx, y0 + 2.36, lz], [0.15, 0.16, 0.15], I3, 4, 6, 10);
+      CYL([lx, y0 + 2.5, lz], [lx, y0 + 2.56, lz], 0.07, iron, 10, 3, 0.03);
+      for (let j = 0; j < 22; j++) {                                                    // leaves
+        const u1 = unit(hashU(sL, 1260 + j, x, z)), u2 = unit(hashU(sL, 1290 + j, x, z));
+        const leaf = [PAL(0.55, 0.25, 0.04), PAL(0.4, 0.16, 0.03), PAL(0.6, 0.45, 0.08)][j % 3];
+        RB([mx + (u1 - 0.5) * 3.2, y0 + 0.027 + j * 0.0002, mz + (u2 - 0.5) * 2.8], [0.03, 0.002, 0.02], rot(u1 * 20), leaf, 0.001);
+      }
+    } else trash(x, z, mx, mz);
     if (ceilHole(seed, lv, x, z, r)) continue;
     // ---- broken and hanging light panels (the shader draws the rest flat in the ceiling) ----
     const kL = cellLight(seed, lv, x, z);
-    if (kL === 3 || (kL === 4 && hungN < 6)) {
+    if (kL === 3 || (kL === 4 && hungN < 6 && eggAt(seed, lv, x, z) < 0)) {
       lightGeom(seed, lv, x, z, kL, LG);
       const ox = LG[0], oz = LG[1], hx = LG[2], hz = LG[3], cxL = mx + ox, czL = mz + oz, yC = y0 + HEIGHT;
       const longZ = hz >= hx, L = longZ ? hz : hx, S = longZ ? hx : hz;
@@ -1099,7 +1266,8 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   const TF = 3 * FLOATS;
   for (let pass = 0; pass < 2; pass++) {
     for (let t = 0; t < n; t += TF) {
-      if (SHINY[out[t + 6] | 0] !== pass) continue;
+      const mm = out[t + 6];
+      if ((mm >= 65536 ? 1 : mm >= 32 ? 0 : SHINY[mm | 0]) !== pass) continue;
       for (let j = 0; j < TF; j++) part[w + j] = out[t + j];
       w += TF;
     }

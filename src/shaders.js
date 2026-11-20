@@ -288,6 +288,7 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
   else if (i.m < 18.5) { albedo = mix(vec3f(0.03), vec3f(0.5, 0.5, 0.47), step(0.45, fract(i.wp.y * 38.0))); }   // return-air grille
   else if (i.m < 19.5) { albedo = poolTile(select(select(i.wp.zy, i.wp.xy, alongX), i.wp.xz, !wall), g, max(max(fw.x, fw.y), fw.z)); }   // pool basin walls and floor
   else if (i.m < 20.5) { albedo = vec3f(0.006, 0.006, 0.007); }  // the figure
+  else if (i.m > 99.5) { let q = (u32(i.m + 0.5) - 100u) & 32767u; albedo = vec3f(f32(q >> 10u), f32((q >> 5u) & 31u), f32(q & 31u)) * (1.0 / 31.0); }   // colour by number (levels.js PAL)
   else { albedo = vec3f(0.46, 0.37, 0.26) * (0.92 + 0.16 * vnoise(vec2f(i.wp.y * 40.0, along * 2.0))); }   // painted door
 
   let f = vec2i(floor(i.wp.xz / CELL));
@@ -357,6 +358,7 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
   if (i.m > 12.5 && i.m < 14.5) { ks = select(0.22, 0.6, i.m < 13.5); }       // glass; black plastic
   if (i.m > 15.5 && i.m < 16.5) { ks = 0.1; }                                 // beige plastic
   if (i.m > 20.5) { ks = 0.08; }                                              // door paint
+  if (i.m > 65535.5) { ks = 0.35; }                                           // glossy colours: car paint, cans
   if ((i.m > 18.5 && i.m < 19.5) || (room == 9 && (i.m < 0.5 || (i.m > 1.5 && i.m < 2.5)))) { ks = 0.3; }   // glazed tile
   if (SHINY && ks > 0.0 && !wet) {   // from the panel over this spot, as bright as the light arriving here
     let L = normalize(vec3f((f32(f.x) + 0.5) * CELL, HEIGHT - 0.05, (f32(f.y) + 0.5) * CELL) - i.wp);
