@@ -214,6 +214,15 @@ export function lightGeom(seed, lv, x, z, kind, out) {
   return out;
 }
 
+// the ceiling opening of a light panel (its rect in metres)
+const LGt = new Float64Array(7);
+function troffRect(seed, lv, x, z, r) {
+  lightGeom(seed, lv, x, z, 3, LGt);
+  const cx = (x + 0.5) * CELL + LGt[0], cz = (z + 0.5) * CELL + LGt[1];
+  r[0] = cx - LGt[2]; r[1] = cz - LGt[3]; r[2] = cx + LGt[2]; r[3] = cz + LGt[3];
+  return true;
+}
+
 // cellLight, but with the follow room's rule applied for someone in cell (pcx, pcz)
 export function liveLight(seed, lv, x, z, pcx, pcz) {
   const k = cellLight(seed, lv, x, z);
@@ -498,7 +507,8 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   let n = buildChunk(sL, cx, cz, out, {
     y0,
     floorHole: (x, z, r) => floorHole(seed, lv, x, z, r) || (poolAt(seed, lv, x, z) && poolRect(x, z, r)),
-    ceilHole: (x, z, r) => ceilHole(seed, lv, x, z, r),
+    // (the ceiling also opens over a panel whose cover is gone: its tubes sit up in the recessed housing)
+    ceilHole: (x, z, r) => ceilHole(seed, lv, x, z, r) || (cellLight(seed, lv, x, z) === 3 && troffRect(seed, lv, x, z, r)),
     light: (x, z) => cellLight(seed, lv, x, z),
     cut: (salt, line, i, out) => stairCut(seed, lv, salt, line, i, out),
   }) * FLOATS;
@@ -924,14 +934,22 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
       const ox = LG[0], oz = LG[1], hx = LG[2], hz = LG[3], cxL = mx + ox, czL = mz + oz, yC = y0 + HEIGHT;
       const longZ = hz >= hx, L = longZ ? hz : hx, S = longZ ? hx : hz;
       const P2 = (a, c, y) => longZ ? [cxL + c, y, czL + a] : [cxL + a, y, czL + c];   // along the long side, across it
-      if (kL === 3) {                          // the cover's gone: two bare tubes in their sockets, the ballast channel
-        const dead = (hashU(sL, 312, x, z) & 1) === 1;
+      if (kL === 3) {                          // the cover's gone: the recessed housing, two bare tubes in their sockets, the ballast channel
+        const dead = (hashU(sL, 312, x, z) & 1) === 1, D = 0.11, yT = yC + D;
+        const c00 = P2(-L, -S, 0), c11 = P2(L, S, 0), xa = Math.min(c00[0], c11[0]), xb = Math.max(c00[0], c11[0]), za = Math.min(c00[2], c11[2]), zb = Math.max(c00[2], c11[2]);
+        Q([xa, yT, za], [xb, yT, za], [xb, yT, zb], [xa, yT, zb], 0, -1, 0, 8);                              // reflector
+        Q([xa, yC, za], [xb, yC, za], [xb, yT, za], [xa, yT, za], 0, 0, 1, 8);                               // sides of the pan
+        Q([xa, yC, zb], [xb, yC, zb], [xb, yT, zb], [xa, yT, zb], 0, 0, -1, 8);
+        Q([xa, yC, za], [xa, yC, zb], [xa, yT, zb], [xa, yT, za], 1, 0, 0, 8);
+        Q([xb, yC, za], [xb, yC, zb], [xb, yT, zb], [xb, yT, za], -1, 0, 0, 8);
+        for (const [cx2, cz2, hx2, hz2] of [[(xa + xb) / 2, za, (xb - xa) / 2 + 0.012, 0.012], [(xa + xb) / 2, zb, (xb - xa) / 2 + 0.012, 0.012], [xa, (za + zb) / 2, 0.012, (zb - za) / 2], [xb, (za + zb) / 2, 0.012, (zb - za) / 2]])
+          RB([cx2, yC - 0.004, cz2], [hx2, 0.005, hz2], I3, 3, 0.003);                                      // the frame's lip
+        RB(P2(0, 0, yT - 0.012), longZ ? [S * 0.14, 0.012, L - 0.06] : [L - 0.06, 0.012, S * 0.14], I3, 3, 0.004);
         for (const side of [-1, 1]) {
-          const c = side * S * 0.33;
-          CYL(P2(-(L - 0.045), c, yC - 0.034), P2(L - 0.045, c, yC - 0.034), 0.0127, dead && side > 0 ? 8 : 4, 8, 3);
-          for (const e of [-1, 1]) RB(P2(e * (L - 0.026), c, yC - 0.024), longZ ? [0.024, 0.024, 0.02] : [0.02, 0.024, 0.024], I3, 16, 0.006);
+          const c = side * S * 0.45;
+          CYL(P2(-(L - 0.03), c, yC + 0.045), P2(L - 0.03, c, yC + 0.045), 0.0127, dead && side > 0 ? 3 : 4, 8, 3);
+          for (const e of [-1, 1]) RB(P2(e * (L - 0.012), c, yC + 0.05), longZ ? [0.024, 0.026, 0.012] : [0.012, 0.026, 0.024], I3, 16, 0.005);
         }
-        RB(P2(0, 0, yC - 0.009), longZ ? [S * 0.14, 0.009, L - 0.07] : [L - 0.07, 0.009, S * 0.14], I3, 3, 0.004);
         // the lens door: on the floor underneath, hanging open from one side, or gone
         const dv = hashU(sL, 350, x, z) % 10;
         if (dv < 4 && roomCell(sL, x, z) < 0 && propAt(seed, lv, x, z, pL)[0] < 0 && !floorHole(seed, lv, x, z, rL) && !stairAt(seed, lv, x, z)) {
