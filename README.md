@@ -1,6 +1,6 @@
 # Manila
 
-**An endless office that was never finished. Walk it, fly it, photograph it.**
+**An endless office that is out of bounds. Walk it, fly it, photograph it.**
 
 Manila is an endless, procedurally generated backrooms that runs in your browser: yellowed
 wallpaper, damp carpet, and the hum of fluorescent lights that never quite stop flickering. Every
@@ -60,7 +60,15 @@ There is nothing to fight. There is a lot to find.
 ## Requirements
 
 WebGPU. A current Chrome or Edge on desktop works best; Firefox and Safari support it on some
-systems. A discrete GPU is recommended for full resolution.
+systems.
+
+On slower machines, use the **Graphics** setting in the menu (Esc). It has five options:
+
+- **Auto** (the default) starts on High and steps down whenever the game runs under 28 fps.
+- **Low:** half resolution, with no anti-aliasing and no ambient occlusion. Runs on most integrated graphics.
+- **Medium:** three-quarter resolution, with no anti-aliasing.
+- **High:** full resolution, with all effects on.
+- **Ultra:** also renders at your screen's full pixel density on high-DPI displays.
 
 ## Inspiration
 

@@ -123,6 +123,32 @@ async function start() {
   try { const v = localStorage.getItem('backrooms.sens'); if (v !== null) sensEl.value = v; } catch {}
   const sens = () => 0.0022 * Math.pow(4, (sensEl.value - 50) / 50);       // x1/4 .. x4 around the default
   sensEl.oninput = () => { try { localStorage.setItem('backrooms.sens', sensEl.value); } catch {} };
+  // graphics presets: render resolution (x CSS pixels), anti-aliasing, ambient occlusion. Auto starts on
+  // High and steps down a preset whenever a few seconds of play run under 28 fps (it never steps back up).
+  const PRESETS = ['low', 'medium', 'high', 'ultra'];
+  const QUALITY = {
+    low: { scale: 0.5, msaa: 1, ao: false },
+    medium: { scale: 0.75, msaa: 1, ao: true },
+    high: { scale: 1, msaa: 4, ao: true },
+    ultra: { scale: Math.min(2, devicePixelRatio || 1), msaa: 4, ao: true },
+  };
+  const gfxEl = $('gfx');
+  let gfx = 'auto', autoQ = 'high', slowT = 0, slowN = 0;
+  try { const v = localStorage.getItem('backrooms.gfx'); if (v && (v === 'auto' || QUALITY[v])) gfx = v; } catch {}
+  const quality = () => QUALITY[gfx === 'auto' ? autoQ : gfx];
+  const applyQuality = () => {
+    const q = quality(); R.setQuality(q.msaa, q.ao);
+    gfxEl.options[0].text = 'Auto (' + autoQ[0].toUpperCase() + autoQ.slice(1) + ')';
+  };
+  gfxEl.value = gfx; applyQuality();
+  gfxEl.onchange = () => { gfxEl.blur(); gfx = gfxEl.value; autoQ = 'high'; slowT = slowN = 0; applyQuality(); try { localStorage.setItem('backrooms.gfx', gfx); } catch {} };
+  const autoTune = (dt, playing) => {
+    if (gfx !== 'auto' || !playing || autoQ === 'low') { slowT = slowN = 0; return; }
+    slowT += dt; slowN++;
+    if (slowT < 3) return;
+    if (slowN / slowT < 28) { autoQ = PRESETS[PRESETS.indexOf(autoQ) - 1]; applyQuality(); }
+    slowT = slowN = 0;
+  };
 
   // Pointer lock with raw mouse input where the browser has it. Chrome's default (OS-accelerated)
   // pointer lock sometimes reports one huge jump in movementX/Y, which snapped the view; raw input
@@ -136,7 +162,7 @@ async function start() {
   $('go').onclick = () => { wake(); lock(); };
   canvas.onclick = () => { wake(); if (!document.pointerLockElement) lock(); };
   canvas.oncontextmenu = (e) => e.preventDefault();
-  document.addEventListener('pointerlockchange', () => { menu.classList.toggle('off', document.pointerLockElement === canvas); keys.clear(); zoom = false; skip = 2; autoCam = false; showPhotos(); });
+  document.addEventListener('pointerlockchange', () => { if (document.pointerLockElement === canvas && document.activeElement && document.activeElement.blur) document.activeElement.blur(); menu.classList.toggle('off', document.pointerLockElement === canvas); keys.clear(); zoom = false; skip = 2; autoCam = false; showPhotos(); });
   document.addEventListener('mousedown', (e) => { if (e.button === 2 && document.pointerLockElement === canvas) zoom = true; });
   document.addEventListener('mouseup', (e) => { if (e.button === 2) zoom = false; });
   let avg = 4, skip = 0;                      // running mean of |movement|; events to ignore after (re)locking
@@ -155,12 +181,14 @@ async function start() {
   let last = performance.now(), fpsT = 0, fpsN = 0;
   function frame(now) {
     requestAnimationFrame(frame);
-    const dt = Math.min(0.05, (now - last) / 1000); last = now;
-    const w = Math.max(1, Math.round(canvas.clientWidth * devicePixelRatio)), h = Math.max(1, Math.round(canvas.clientHeight * devicePixelRatio));
+    const rawDt = (now - last) / 1000, dt = Math.min(0.05, rawDt); last = now;
+    const sc = quality().scale;
+    const w = Math.max(1, Math.round(canvas.clientWidth * sc)), h = Math.max(1, Math.round(canvas.clientHeight * sc));
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
     R.resize(w, h);
 
     const locked = document.pointerLockElement === canvas;
+    autoTune(Math.min(rawDt, 0.5), locked);
     if (drone) {
       const k = key;                                    // (keys are cleared whenever the mouse is let go)
       flyDrone(seed, pos, dr, k('KeyW') - k('KeyS'), k('KeyD') - k('KeyA'), k('Space') - k('KeyC'), k('ShiftLeft') || k('ShiftRight'), cam.yaw, dt);

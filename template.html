@@ -16,6 +16,7 @@
   #vl { display: flex; flex-wrap: wrap; justify-content: center; gap: 22px; font-size: 13px; }
   #vl label { display: flex; align-items: center; gap: 10px; }
   #vl input { width: 160px; accent-color: #e9dfb8; }
+  #vl select { font: inherit; background: #1a160c; color: #e9dfb8; border: 1px solid rgba(233, 223, 184, .4); border-radius: 3px; padding: 3px 6px; }
   #ph { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; font-size: 13px; }
   #ph button { padding: 5px 14px; background: transparent; color: #e9dfb8; border: 1px solid rgba(233, 223, 184, .5); }
   #ph button:disabled { opacity: .35; cursor: default; }
@@ -36,7 +37,8 @@
 <div id="menu">
   <h1>Manila</h1>
   <button id="go">Enter</button>
-  <div id="vl"><label>Volume <input id="vol" type="range" min="0" max="100" value="50"></label><label>Mouse <input id="sens" type="range" min="0" max="100" value="50"></label></div>
+  <div id="vl"><label>Volume <input id="vol" type="range" min="0" max="100" value="50"></label><label>Mouse <input id="sens" type="range" min="0" max="100" value="50"></label>
+    <label>Graphics <select id="gfx"><option value="auto">Auto</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="ultra">Ultra</option></select></label></div>
   <small>WASD move &middot; mouse look &middot; Shift run &middot; C crouch &middot; right-click zoom &middot; M mute &middot; H stats &middot; Esc menu</small>
   <small>F drone (Space up, C down) &middot; P photo &middot; O auto camera &middot; V camcorder look</small>
   <div id="ph"><span id="phn"></span><button id="phsave">Save all (.zip)</button><button id="phdir">Save straight to a folder</button></div>

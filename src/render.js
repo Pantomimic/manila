@@ -6,7 +6,7 @@ import { FH, buildLevelChunk, levelSeed, levelOf, cellLight, lightGeom, shinyFro
 import { SCENE } from './shaders.js';
 import { POST } from './post.js';
 
-const HDR = 'rgba16float', DEPTH = 'depth24plus', MSAA = 4, LEVELS = 5;
+const HDR = 'rgba16float', DEPTH = 'depth24plus', LEVELS = 5;
 // Chunks within RANGE (in chunks, square) of the camera's chunk are kept loaded. 3 -> 7x7 chunks,
 // 72 m in every direction, well past where the fog swallows everything. The levels above and below
 // are only seen through holes and stairwells, so they get RANGE2.
@@ -101,6 +101,7 @@ export function createRenderer(device, outFormat, seed) {
   const UB = new Float32Array(28);
   const ubo = device.createBuffer({ size: UB.byteLength, usage: BU.UNIFORM | BU.COPY_DST });
   const sceneMod = device.createShaderModule({ code: SCENE });
+  let MSAA = 4, AO = true;      // graphics settings (setQuality); pipelines and targets are rebuilt when they change
   const scenePipeDesc = (shiny) => ({
     layout: 'auto',
     vertex: { module: sceneMod, entryPoint: 'vs', buffers: [{ arrayStride: 28, attributes: [
@@ -113,16 +114,28 @@ export function createRenderer(device, outFormat, seed) {
     multisample: { count: MSAA },
   });
   // two pipelines from one shader: everything, then glossy materials again with highlights (see levels.js)
-  const scenePipe = device.createRenderPipeline(scenePipeDesc(false)), shinyPipe = device.createRenderPipeline(scenePipeDesc(true));
-  const sceneBG = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: dataTex.createView() }] });
-  const shinyBG = device.createBindGroup({ layout: shinyPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: dataTex.createView() }] });
+  let scenePipe, shinyPipe, sceneBG, shinyBG;
+  const dataView = dataTex.createView();
+  const scenePipes = () => {
+    scenePipe = device.createRenderPipeline(scenePipeDesc(false)); shinyPipe = device.createRenderPipeline(scenePipeDesc(true));
+    sceneBG = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: dataView }] });
+    shinyBG = device.createBindGroup({ layout: shinyPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: dataView }] });
+  };
+  scenePipes();
 
   // ---- post pipelines ----
   const postMod = device.createShaderModule({ code: POST });
+  // fsPre reads the depth buffer, which is multisampled or not: its own module for each
+  const preMods = { 4: postMod, 1: null };
   const ADD = { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } };
-  const postPipe = (entry, format, blend) => device.createRenderPipeline({ layout: 'auto',
-    vertex: { module: postMod, entryPoint: 'vs' }, fragment: { module: postMod, entryPoint: entry, targets: [{ format, blend }] } });
-  const pAO = postPipe('fsAO', 'rg16float'), pBlur = postPipe('fsBlur', 'rg16float'), pPre = postPipe('fsPre', HDR), pDown = postPipe('fsDown', HDR), pUp = postPipe('fsUp', HDR, ADD), pFinal = postPipe('fsFinal', outFormat);
+  const postPipe = (entry, format, blend, mod = postMod) => device.createRenderPipeline({ layout: 'auto',
+    vertex: { module: mod, entryPoint: 'vs' }, fragment: { module: mod, entryPoint: entry, targets: [{ format, blend }] } });
+  const pAO = postPipe('fsAO', 'rg16float'), pBlur = postPipe('fsBlur', 'rg16float'), pDown = postPipe('fsDown', HDR), pUp = postPipe('fsUp', HDR, ADD), pFinal = postPipe('fsFinal', outFormat);
+  let pPre = postPipe('fsPre', HDR);
+  // with AO off the final pass reads this 1x1 "fully open" texture instead
+  const noAO = device.createTexture({ size: [1, 1], format: 'rg16float', usage: TU.TEXTURE_BINDING | TU.COPY_DST });
+  Q.writeTexture({ texture: noAO }, new Uint16Array([0x3c00, 0x3c00]), { bytesPerRow: 4 }, [1, 1]);
+  const noAOView = noAO.createView();
   const smp = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
   const PU = new Float32Array(12);
   const puBuf = device.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
@@ -135,15 +148,18 @@ export function createRenderer(device, outFormat, seed) {
   const finalAtt = { view: null, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } };
   const finalPass = { colorAttachments: [finalAtt] };
   let blits = [], finalBG = null;     // blits: [{ pass, pipe, bg }]
-  function resize(w, h) {
-    if (w === W && h === H) return;
+  let hdrView = null;
+  function resize(w, h, force) {
+    if (w === W && h === H && !force) return;
     W = w; H = h;
     for (const t of textures) t.destroy();
     const mk = (tw, th, format, usage, sampleCount = 1) => { const t = device.createTexture({ size: [tw, th], format, usage, sampleCount }); textures.push(t); return t; };
     textures = [];
-    const msaa = mk(W, H, HDR, TU.RENDER_ATTACHMENT, MSAA), depth = mk(W, H, DEPTH, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING, MSAA);
+    const depth = mk(W, H, DEPTH, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING, MSAA);
     const hdr = mk(W, H, HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING);
-    msaaAtt.view = msaa.createView(); msaaAtt.resolveTarget = hdr.createView(); depthAtt.view = depth.createView();
+    hdrView = hdr.createView(); depthAtt.view = depth.createView();
+    if (MSAA > 1) { msaaAtt.view = mk(W, H, HDR, TU.RENDER_ATTACHMENT, MSAA).createView(); msaaAtt.resolveTarget = hdrView; msaaAtt.storeOp = 'discard'; }
+    else { msaaAtt.view = hdrView; msaaAtt.resolveTarget = undefined; msaaAtt.storeOp = 'store'; }
     const lv = [];
     for (let i = 0; i < LEVELS; i++) lv.push(mk(Math.max(1, W >> (i + 1)), Math.max(1, H >> (i + 1)), HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING).createView());
     const bg = (pipe, view) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: view }, { binding: 1, resource: smp }] });
@@ -151,13 +167,26 @@ export function createRenderer(device, outFormat, seed) {
     const hw = Math.max(1, W >> 1), hh = Math.max(1, H >> 1);
     const ao0 = mk(hw, hh, 'rg16float', TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING).createView(), ao1 = mk(hw, hh, 'rg16float', TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING).createView();
     blits = [
-      { pass: pass(lv[0]), pipe: pPre, bg: device.createBindGroup({ layout: pPre.getBindGroupLayout(0), entries: [{ binding: 0, resource: msaaAtt.resolveTarget }, { binding: 1, resource: smp }, { binding: 3, resource: { buffer: puBuf } }, { binding: 5, resource: depthAtt.view }] }) },
-      { pass: pass(ao0), pipe: pAO, bg: device.createBindGroup({ layout: pAO.getBindGroupLayout(0), entries: [{ binding: 0, resource: lv[0] }, { binding: 3, resource: { buffer: puBuf } }] }) },
-      { pass: pass(ao1), pipe: pBlur, bg: device.createBindGroup({ layout: pBlur.getBindGroupLayout(0), entries: [{ binding: 4, resource: ao0 }] }) }];
+      { pass: pass(lv[0]), pipe: pPre, bg: device.createBindGroup({ layout: pPre.getBindGroupLayout(0), entries: [{ binding: 0, resource: hdrView }, { binding: 1, resource: smp }, { binding: 3, resource: { buffer: puBuf } }, { binding: 5, resource: depthAtt.view }] }) },
+      ...(AO ? [{ pass: pass(ao0), pipe: pAO, bg: device.createBindGroup({ layout: pAO.getBindGroupLayout(0), entries: [{ binding: 0, resource: lv[0] }, { binding: 3, resource: { buffer: puBuf } }] }) },
+      { pass: pass(ao1), pipe: pBlur, bg: device.createBindGroup({ layout: pBlur.getBindGroupLayout(0), entries: [{ binding: 4, resource: ao0 }] }) }] : [])];
     for (let i = 1; i < LEVELS; i++) blits.push({ pass: pass(lv[i]), pipe: pDown, bg: bg(pDown, lv[i - 1]) });
     for (let i = LEVELS - 2; i >= 0; i--) blits.push({ pass: pass(lv[i], true), pipe: pUp, bg: bg(pUp, lv[i + 1]) });
     finalBG = device.createBindGroup({ layout: pFinal.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: msaaAtt.resolveTarget }, { binding: 1, resource: smp }, { binding: 2, resource: lv[0] }, { binding: 3, resource: { buffer: puBuf } }, { binding: 4, resource: ao1 }] });
+      { binding: 0, resource: hdrView }, { binding: 1, resource: smp }, { binding: 2, resource: lv[0] }, { binding: 3, resource: { buffer: puBuf } }, { binding: 4, resource: AO ? ao1 : noAOView }] });
+  }
+  // graphics settings: msaa 1 or 4, ao on or off (resolution is the caller's canvas size)
+  function setQuality(msaa, ao) {
+    msaa = msaa > 1 ? 4 : 1; ao = !!ao;
+    if (msaa === MSAA && ao === AO) return;
+    if (msaa !== MSAA) {
+      MSAA = msaa;
+      if (!preMods[MSAA]) preMods[MSAA] = device.createShaderModule({ code: POST.replace('texture_depth_multisampled_2d', 'texture_depth_2d') });
+      pPre = postPipe('fsPre', HDR, undefined, preMods[MSAA]);
+      scenePipes();
+    }
+    AO = ao;
+    if (W) resize(W, H, true);
   }
 
   // view-projection matrix, column-major, WebGPU depth range 0..1
@@ -216,5 +245,5 @@ export function createRenderer(device, outFormat, seed) {
     stats.tris = verts / 3; stats.chunkX = curCX; stats.chunkZ = curCZ; stats.level = curLV;
   }
 
-  return { resize, stream, render, stats, look, get width() { return W; }, get height() { return H; } };
+  return { resize, setQuality, stream, render, stats, look, get width() { return W; }, get height() { return H; } };
 }
