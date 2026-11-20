@@ -25,6 +25,8 @@ There is nothing to fight. There is a lot to find.
   should.
 - **Stacked levels:** holes in the floor, odd staircases and missing ceiling tiles lead to the
   floors above and below.
+- **Things from outside:** trash, traffic cones, tyres, fire hydrants and slabs of road turn up
+  more often the further you go, some of them half sunk into the floor or through a wall.
 - **Sound built from nothing:** the ballast hum, the odd door slamming somewhere, a phone ringing,
   and footsteps that aren't yours. All of it is synthesized with Web Audio and placed in 3D.
 - **Camcorder look (V):** tape wobble, chroma smear, tracking noise and a date stamp.
