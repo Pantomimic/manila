@@ -5,8 +5,12 @@ export const POST = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 @group(0) @binding(2) var bloom: texture_2d<f32>;
-struct PU { a: vec4f, b: vec4f };   // a: time, exposure, bloom strength, grain; b: camcorder on, auto exposure
+struct PU { a: vec4f, b: vec4f, c: vec4f };   // a: time, exposure, bloom strength, grain; b: camcorder on, auto exposure; c: tan(fov/2) x and y, near, far
 @group(0) @binding(3) var<uniform> pu: PU;
+// ambient occlusion: r = how open the spot is (1 open, lower in corners and under things), g = view depth
+@group(0) @binding(4) var aoT: texture_2d<f32>;
+// the scene's depth buffer (multisampled; sample 0 is enough)
+@group(0) @binding(5) var dep: texture_depth_multisampled_2d;
 
 struct VO { @builtin(position) p: vec4f, @location(0) uv: vec2f };
 @vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
@@ -20,10 +24,14 @@ fn box4(uv: vec2f) -> vec3f {
         + textureSampleLevel(src, smp, uv + t * vec2f(-1.0, 1.0), 0.0).rgb + textureSampleLevel(src, smp, uv + t * vec2f(1.0, 1.0), 0.0).rgb) * 0.25;
 }
 // first downsample: keep only what is brighter than 1 (the panels), soft knee, clamp fireflies
+// (alpha: the view depth of one of the four pixels, from the depth buffer, for the AO pass, which reads
+// this half-size copy. Writing depth from the scene pass itself cost 4 ms a frame on Intel graphics.)
 @fragment fn fsPre(i: VO) -> @location(0) vec4f {
   let c = min(box4(i.uv), vec3f(40.0));
   let l = max(c.r, max(c.g, c.b));
-  return vec4f(c * (max(l - 1.0, 0.0) / max(l, 1e-4)), 1.0);
+  let z = textureLoad(dep, vec2i(i.uv * vec2f(textureDimensions(dep))), 0);
+  let d = pu.c.z * pu.c.w / (pu.c.w - z * (pu.c.w - pu.c.z));       // depth buffer value -> metres from the camera
+  return vec4f(c * (max(l - 1.0, 0.0) / max(l, 1e-4)), d);
 }
 @fragment fn fsDown(i: VO) -> @location(0) vec4f { return vec4f(box4(i.uv), 1.0); }
 // tent filter from the smaller level, added onto the larger one
@@ -37,6 +45,58 @@ fn box4(uv: vec2f) -> vec3f {
   return vec4f(c / 16.0, 1.0);
 }
 
+// ---- ambient occlusion from the depth the scene pass leaves in alpha (read from fsPre's half-size copy) ----
+// Corners, the foot of each wall and the floor under furniture get less of the light bouncing around
+// the room. For each pixel: rebuild its position and normal from depth, then count how much nearby
+// geometry sits in front of it within R metres (Alchemy-style estimator), from 10 spiral samples
+// turned per pixel. fsBlur then smooths the noise without blurring across depth edges.
+fn depthAt(p: vec2i) -> f32 { return textureLoad(src, clamp(p, vec2i(0), vec2i(textureDimensions(src)) - 1), 0).a; }
+fn vpos(uv: vec2f, d: f32) -> vec3f { return vec3f((uv.x * 2.0 - 1.0) * pu.c.x * d, (1.0 - 2.0 * uv.y) * pu.c.y * d, -d); }
+const AO_R = 0.5;
+@fragment fn fsAO(i: VO) -> @location(0) vec4f {
+  let dims = vec2f(textureDimensions(src));
+  let fp = vec2i(i.uv * dims);
+  let uv = (vec2f(fp) + 0.5) / dims;
+  let d = depthAt(fp);
+  if (d > 30.0) { return vec4f(1.0, d, 0.0, 1.0); }
+  let p = vpos(uv, d);
+  let px = 1.0 / dims;
+  let dl = depthAt(fp - vec2i(1, 0)); let dr = depthAt(fp + vec2i(1, 0));
+  let du = depthAt(fp - vec2i(0, 1)); let dd = depthAt(fp + vec2i(0, 1));
+  let ex = select(p - vpos(uv - vec2f(px.x, 0.0), dl), vpos(uv + vec2f(px.x, 0.0), dr) - p, abs(dr - d) < abs(dl - d));
+  let ey = select(p - vpos(uv - vec2f(0.0, px.y), du), vpos(uv + vec2f(0.0, px.y), dd) - p, abs(dd - d) < abs(du - d));
+  let n = normalize(cross(ey, ex));
+  let rad = min(vec2f(AO_R / (2.0 * pu.c.x * d), AO_R / (2.0 * pu.c.y * d)), vec2f(0.05));   // (capped: wide spreads thrash the texture cache)
+  let ign = fract(52.9829189 * fract(dot(i.p.xy, vec2f(0.06711056, 0.00583715))));
+  var sum = 0.0;
+  for (var k = 0; k < 10; k++) {
+    let a = (f32(k) + ign) * 2.39996;
+    let r = sqrt((f32(k) + 0.5) / 10.0);
+    let s = uv + vec2f(cos(a), sin(a)) * r * rad;
+    let sp = vpos(s, depthAt(vec2i(s * dims)));
+    let v = sp - p;
+    let vv = dot(v, v);
+    sum += max(0.0, dot(v, n) - 0.015 * d) / (vv + 0.03) * (1.0 - smoothstep(AO_R * AO_R, 4.0 * AO_R * AO_R, vv));
+  }
+  var ao = clamp(1.0 - 0.09 * sum, 0.3, 1.0);
+  ao = mix(ao, 1.0, smoothstep(14.0, 28.0, d));
+  return vec4f(ao, d, 0.0, 1.0);
+}
+@fragment fn fsBlur(i: VO) -> @location(0) vec4f {
+  let dims = vec2i(textureDimensions(aoT));
+  let c = vec2i(i.uv * vec2f(dims));
+  let d0 = textureLoad(aoT, c, 0).g;
+  var s = 0.0; var w = 0.0;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let t = textureLoad(aoT, clamp(c + vec2i(x, y) * 2, vec2i(0), dims - 1), 0);   // (every other texel: wider, same cost)
+      let k = exp(-abs(t.g - d0) / (0.03 * d0 + 0.01)) * (1.0 - 0.2 * f32(abs(x) + abs(y)));
+      s += t.r * k; w += k;
+    }
+  }
+  return vec4f(s / max(w, 1e-4), d0, 0.0, 1.0);
+}
+
 fn grainHash(p: vec2u, f: u32) -> f32 {
   var h = (p.x * 0x8da6b343u) ^ (p.y * 0xd8163841u) ^ (f * 0xcb1ab31fu);
   h ^= h >> 16u; h *= 0x7feb352du; h ^= h >> 15u; h *= 0x846ca68bu; h ^= h >> 16u;
@@ -47,7 +107,7 @@ fn tone(c0: vec3f) -> vec3f {
   // filmic curve (ACES fit), slightly lifted toe so the dark zones keep some detail
   return clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
 }
-fn scene(uv: vec2f) -> vec3f { return textureSampleLevel(src, smp, uv, 0.0).rgb + textureSampleLevel(bloom, smp, uv, 0.0).rgb * pu.a.z; }
+fn scene(uv: vec2f) -> vec3f { return textureSampleLevel(src, smp, uv, 0.0).rgb * textureSampleLevel(aoT, smp, uv, 0.0).r + textureSampleLevel(bloom, smp, uv, 0.0).rgb * pu.a.z; }
 fn yiq(c: vec3f) -> vec3f { return vec3f(dot(c, vec3f(0.299, 0.587, 0.114)), dot(c, vec3f(0.596, -0.274, -0.322)), dot(c, vec3f(0.211, -0.523, 0.312))); }
 fn rgb(q: vec3f) -> vec3f { return vec3f(q.x + 0.956 * q.y + 0.621 * q.z, q.x - 0.272 * q.y - 0.647 * q.z, q.x - 1.106 * q.y + 1.703 * q.z); }
 @fragment fn fsFinal(i: VO) -> @location(0) vec4f {

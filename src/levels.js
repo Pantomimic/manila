@@ -350,12 +350,16 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   // oriented box: centre c, half sizes h, rotation R (3x3, columns = local axes), material m
   // skip: faces to leave out, bit (2 * axis + (negative side ? 1 : 0)); 8 = the bottom (never seen on the floor)
   const OB = (c, h, R, m, skip = 0) => {
-    const P = (sx, sy, sz) => [c[0] + R[0] * sx * h[0] + R[3] * sy * h[1] + R[6] * sz * h[2], c[1] + R[1] * sx * h[0] + R[4] * sy * h[1] + R[7] * sz * h[2], c[2] + R[2] * sx * h[0] + R[5] * sy * h[1] + R[8] * sz * h[2]];
-    const face = (ax, s, m2) => {             // the face whose normal is local axis ax * s
-      const u = (ax + 1) % 3, v = (ax + 2) % 3, pt = (a, b) => { const q = [0, 0, 0]; q[ax] = s; q[u] = a; q[v] = b; return P(q[0], q[1], q[2]); };
-      Q(pt(-1, -1), pt(1, -1), pt(1, 1), pt(-1, 1), R[ax * 3] * s, R[ax * 3 + 1] * s, R[ax * 3 + 2] * s, m2);
-    };
-    for (let ax = 0; ax < 3; ax++) { if (!(skip & (1 << ax * 2))) face(ax, 1, m); if (!(skip & (2 << ax * 2))) face(ax, -1, m); }
+    for (let k = 0; k < 8; k++) {
+      const x = (k & 1 ? -h[0] : h[0]), y = (k & 2 ? -h[1] : h[1]), z = (k & 4 ? -h[2] : h[2]);
+      rbP[k * 3] = c[0] + R[0] * x + R[3] * y + R[6] * z; rbP[k * 3 + 1] = c[1] + R[1] * x + R[4] * y + R[7] * z; rbP[k * 3 + 2] = c[2] + R[2] * x + R[5] * y + R[8] * z;
+    }
+    for (let ax = 0; ax < 3; ax++) for (let neg = 0; neg < 2; neg++) {      // the face whose normal is local axis ax, negated if neg
+      if (skip & ((neg ? 2 : 1) << ax * 2)) continue;
+      const u = 1 << (ax + 1) % 3, v = 1 << (ax + 2) % 3, sb = neg << ax, g = neg ? -1 : 1;
+      const nx = R[ax * 3] * g, ny = R[ax * 3 + 1] * g, nz = R[ax * 3 + 2] * g;
+      for (const k of [sb, sb | u, sb | u | v, sb, sb | u | v, sb | v]) V(rbP[k * 3], rbP[k * 3 + 1], rbP[k * 3 + 2], nx, ny, nz, m);
+    }
   };
   // R turned by a about its own x axis (positive: the top leans back toward -z)
   const tiltX = (R, a) => {
@@ -377,50 +381,160 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
   };
   const loc = (R, o, l) => [o[0] + R[0] * l[0] + R[3] * l[1] + R[6] * l[2], o[1] + R[1] * l[0] + R[4] * l[1] + R[7] * l[2], o[2] + R[2] * l[0] + R[5] * l[1] + R[8] * l[2]];
 
+  // ---- rounded shapes. RB: a box whose edges are rounded off by b (one bevel strip per edge with the
+  // normals of the two faces it joins, so light rolls round the edge instead of stopping at it).
+  // skip works as for OB, and also drops the edges and corners that touch a skipped face.
+  const VN = (p, nn, m) => V(p[0], p[1], p[2], nn[0], nn[1], nn[2], m);
+  // (every point is a corner of either the full box or the box shrunk by b on some axes: 64 of them,
+  // worked out once per box into rbP, then triangles pick from them)
+  const RB = (c, h, R, m, b, skip = 0) => {
+    b = Math.min(b, h[0] * 0.95, h[1] * 0.95, h[2] * 0.95);
+    if (b <= 0.0005) { OB(c, h, R, m, skip); return; }
+    for (let k = 0; k < 64; k++) {
+      const x = (k & 1 ? -1 : 1) * (k & 8 ? h[0] - b : h[0]), y = (k & 2 ? -1 : 1) * (k & 16 ? h[1] - b : h[1]), z = (k & 4 ? -1 : 1) * (k & 32 ? h[2] - b : h[2]);
+      rbP[k * 3] = c[0] + R[0] * x + R[3] * y + R[6] * z; rbP[k * 3 + 1] = c[1] + R[1] * x + R[4] * y + R[7] * z; rbP[k * 3 + 2] = c[2] + R[2] * x + R[5] * y + R[8] * z;
+    }
+    // point index: sign bit per axis (1 = negative) | inset bit per axis << 3
+    const pi = (sg, ins) => sg | ins << 3;
+    const E = (k, ax, neg) => { const g = neg ? -1 : 1; V(rbP[k * 3], rbP[k * 3 + 1], rbP[k * 3 + 2], R[ax * 3] * g, R[ax * 3 + 1] * g, R[ax * 3 + 2] * g, m); };
+    for (let ax = 0; ax < 3; ax++) for (let neg = 0; neg < 2; neg++) {
+      if (skip & ((neg ? 2 : 1) << ax * 2)) continue;
+      const u = (ax + 1) % 3, v = (ax + 2) % 3, ins = (1 << u) | (1 << v), sb = neg << ax;
+      const k00 = pi(sb, ins), k10 = pi(sb | 1 << u, ins), k11 = pi(sb | 1 << u | 1 << v, ins), k01 = pi(sb | 1 << v, ins);
+      E(k00, ax, neg); E(k10, ax, neg); E(k11, ax, neg); E(k00, ax, neg); E(k11, ax, neg); E(k01, ax, neg);
+    }
+    for (let a1 = 0; a1 < 3; a1++) for (let a2 = a1 + 1; a2 < 3; a2++) {
+      const a3 = 3 - a1 - a2;
+      for (let n1 = 0; n1 < 2; n1++) for (let n2 = 0; n2 < 2; n2++) {
+        if ((skip & ((n1 ? 2 : 1) << a1 * 2)) || (skip & ((n2 ? 2 : 1) << a2 * 2))) continue;
+        const sb = n1 << a1 | n2 << a2, iA = (1 << a2) | (1 << a3), iB = (1 << a1) | (1 << a3);
+        const A0 = pi(sb | 1 << a3, iA), A1 = pi(sb, iA), B1 = pi(sb, iB), B0 = pi(sb | 1 << a3, iB);
+        E(A0, a1, n1); E(A1, a1, n1); E(B1, a2, n2); E(A0, a1, n1); E(B1, a2, n2); E(B0, a2, n2);
+      }
+    }
+    for (let sb = 0; sb < 8; sb++) {
+      if ((skip & ((sb & 1 ? 2 : 1))) || (skip & ((sb & 2 ? 2 : 1) << 2)) || (skip & ((sb & 4 ? 2 : 1) << 4))) continue;
+      E(pi(sb, 6), 0, sb & 1); E(pi(sb, 5), 1, (sb >> 1) & 1); E(pi(sb, 3), 2, (sb >> 2) & 1);
+    }
+  };
+  // CYL: a round bar from a to b, radius r at a and r2 at b, smooth sides; caps: 1 closes a, 2 closes b
+  const CYL = (a, b, r, m, segs = 8, caps = 0, r2 = r) => {
+    const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], dl = Math.hypot(d[0], d[1], d[2]) || 1;
+    d[0] /= dl; d[1] /= dl; d[2] /= dl;
+    const t = Math.abs(d[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    let e1 = [d[1] * t[2] - d[2] * t[1], d[2] * t[0] - d[0] * t[2], d[0] * t[1] - d[1] * t[0]];
+    const el = Math.hypot(e1[0], e1[1], e1[2]); e1 = [e1[0] / el, e1[1] / el, e1[2] / el];
+    const e2 = [d[1] * e1[2] - d[2] * e1[1], d[2] * e1[0] - d[0] * e1[2], d[0] * e1[1] - d[1] * e1[0]];
+    const ring = (k) => { const an = k / segs * 2 * PI, c = Math.cos(an), sn = Math.sin(an); return [e1[0] * c + e2[0] * sn, e1[1] * c + e2[1] * sn, e1[2] * c + e2[2] * sn]; };
+    const at = (o, nn, rr) => [o[0] + nn[0] * rr, o[1] + nn[1] * rr, o[2] + nn[2] * rr];
+    const nd = [-d[0], -d[1], -d[2]];
+    for (let k = 0; k < segs; k++) {
+      const n0 = ring(k), n1 = ring(k + 1);
+      VN(at(a, n0, r), n0, m); VN(at(a, n1, r), n1, m); VN(at(b, n1, r2), n1, m);
+      VN(at(a, n0, r), n0, m); VN(at(b, n1, r2), n1, m); VN(at(b, n0, r2), n0, m);
+      if (caps & 1) { VN(a, nd, m); VN(at(a, n1, r), nd, m); VN(at(a, n0, r), nd, m); }
+      if (caps & 2) { VN(b, d, m); VN(at(b, n0, r2), d, m); VN(at(b, n1, r2), d, m); }
+    }
+  };
+  // SPH: an ellipsoid with radii rr (local axes of R), smooth
+  const SPH = (c, rr, R, m, lat = 6, lon = 8) => {
+    const pt = (i, j) => {
+      const th = i / lat * PI, ph = j / lon * 2 * PI, l = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)];
+      const nl = [l[0] / rr[0], l[1] / rr[1], l[2] / rr[2]], q = [l[0] * rr[0], l[1] * rr[1], l[2] * rr[2]];
+      const n0 = [R[0] * nl[0] + R[3] * nl[1] + R[6] * nl[2], R[1] * nl[0] + R[4] * nl[1] + R[7] * nl[2], R[2] * nl[0] + R[5] * nl[1] + R[8] * nl[2]];
+      const nlen = Math.hypot(n0[0], n0[1], n0[2]);
+      return [loc(R, c, q), [n0[0] / nlen, n0[1] / nlen, n0[2] / nlen]];
+    };
+    for (let i = 0; i < lat; i++) for (let j = 0; j < lon; j++) {
+      const A = pt(i, j), B = pt(i + 1, j), C = pt(i + 1, j + 1), D = pt(i, j + 1);
+      VN(A[0], A[1], m); VN(B[0], B[1], m); VN(C[0], C[1], m); VN(A[0], A[1], m); VN(C[0], C[1], m); VN(D[0], D[1], m);
+    }
+  };
+  // HULL: a box whose front (+z, half sizes f) and back (-z, half sizes k) differ, between local z z0 > z1;
+  // dy shifts the back up or down. Flat faces. (The back of a CRT.)
+  const HULL = (o, R, f, k, z0, z1, dy, m) => {
+    const p = [[-f[0], -f[1], z0], [f[0], -f[1], z0], [f[0], f[1], z0], [-f[0], f[1], z0], [-k[0], -k[1] + dy, z1], [k[0], -k[1] + dy, z1], [k[0], k[1] + dy, z1], [-k[0], k[1] + dy, z1]].map((q) => loc(R, o, q));
+    const ctr = loc(R, o, [0, dy / 2, (z0 + z1) / 2]);
+    for (const [a, b, c, d] of [[0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7], [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0]]) {
+      const A = p[a], B = p[b], C = p[c], D = p[d];
+      const u = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], v = [D[0] - A[0], D[1] - A[1], D[2] - A[2]];
+      let nn = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const l = Math.hypot(nn[0], nn[1], nn[2]) || 1; nn = [nn[0] / l, nn[1] / l, nn[2] / l];
+      if ((A[0] - ctr[0]) * nn[0] + (A[1] - ctr[1]) * nn[1] + (A[2] - ctr[2]) * nn[2] < 0) nn = [-nn[0], -nn[1], -nn[2]];
+      Q(A, B, C, D, nn[0], nn[1], nn[2], m);
+    }
+  };
+
   // ---- furniture. Origins at the floor centre; a seat faces +z, a desk's user side is +z.
   // Materials: 6 metal, 9 laminate, 10 fabric, 13 screen, 14 black plastic, 15 drawer fronts, 16 beige plastic
   const B8 = 8;                                // leave out bottom faces
-  // office chair: five-star base, gas column, seat, reclined back on a spine, armrests
+  // office chair: five-star base on casters, gas lift, padded seat and back on a spine, armrests
   const officeChair = (o, R, legs = 0.45, back = 0.3, arms = true) => {
-    for (let k = 0; k < 5; k++) { const a = k * 1.2566 + 0.3, Rk = turnY(R, a); OB(loc(R, o, [Math.cos(a) * 0.15, 0.05, -Math.sin(a) * 0.15]), [0.15, 0.018, 0.022], Rk, 14, B8); }
-    OB(loc(R, o, [0, 0.09, 0]), [0.035, 0.035, 0.035], R, 14, B8);
-    OB(loc(R, o, [0, (legs + 0.12) / 2, 0]), [0.022, (legs - 0.12) / 2, 0.022], R, 6, B8 | 4);
-    OB(loc(R, o, [0, legs - 0.03, 0]), [0.11, 0.025, 0.11], R, 14);
-    OB(loc(R, o, [0, legs + 0.035, 0.01]), [0.25, 0.04, 0.24], R, 10);
-    OB(loc(R, o, [0, legs + 0.12, -0.26]), [0.035, 0.12, 0.014], R, 14);
+    for (let k = 0; k < 5; k++) {
+      const a = k * 1.2566 + 0.3, Rk = turnY(R, a), ca = Math.cos(a), sa = Math.sin(a);   // (turnY: local x -> (cos a, sin a))
+      RB(loc(R, o, [ca * 0.15, 0.078, sa * 0.15]), [0.15, 0.016, 0.02], Rk, 14, 0.012);
+      const w = loc(R, o, [ca * 0.285, 0.032, sa * 0.285]), ax = [-sa * 0.022, 0, ca * 0.022];   // caster wheel, across the spoke
+      CYL(loc(R, w, [-ax[0], 0, -ax[2]]), loc(R, w, ax), 0.03, 14, 8, 3);
+      CYL(loc(R, o, [ca * 0.285, 0.05, sa * 0.285]), loc(R, o, [ca * 0.285, 0.08, sa * 0.285]), 0.012, 14, 6);
+    }
+    CYL(loc(R, o, [0, 0.06, 0]), loc(R, o, [0, 0.105, 0]), 0.048, 14, 10, 2);
+    CYL(loc(R, o, [0, 0.1, 0]), loc(R, o, [0, 0.27, 0]), 0.034, 14, 10);                         // shroud
+    CYL(loc(R, o, [0, 0.27, 0]), loc(R, o, [0, legs - 0.05, 0]), 0.022, 6, 10);                  // chrome lift
+    RB(loc(R, o, [0, legs - 0.045, -0.01]), [0.11, 0.025, 0.13], R, 14, 0.01);                  // mechanism
+    RB(loc(R, o, [0, legs - 0.012, 0.02]), [0.235, 0.012, 0.225], R, 14, 0.01);                 // seat shell
+    RB(loc(R, o, [0, legs + 0.04, 0.02]), [0.245, 0.045, 0.235], R, 10, 0.04);                  // cushion
     const Rb = tiltX(R, 0.14);
-    OB(loc(R, o, [0, legs + 0.2 + back, -0.27 - 0.14 * (0.1 + back)]), [0.23, back, 0.035], Rb, 10);
+    RB(loc(R, o, [0, legs + 0.1, -0.255]), [0.035, 0.1, 0.014], tiltX(R, 0.3), 14, 0.01);       // spine
+    const bc = [0, legs + 0.2 + back, -0.27 - 0.14 * (0.1 + back)];
+    RB(loc(R, o, bc), [0.23, back, 0.04], Rb, 10, 0.045);                                       // padded back
+    RB(loc(R, o, [bc[0], bc[1], bc[2] - 0.035]), [0.215, back * 0.94, 0.012], Rb, 14, 0.012);   // its shell
     if (arms) for (const sx of [-0.27, 0.27]) {
-      OB(loc(R, o, [sx, legs + 0.13, -0.02]), [0.014, 0.1, 0.022], R, 14, B8);
-      OB(loc(R, o, [sx, legs + 0.24, 0]), [0.03, 0.014, 0.11], R, 14);
+      RB(loc(R, o, [sx, legs + 0.11, -0.02]), [0.014, 0.1, 0.022], R, 14, 0.008, B8);
+      RB(loc(R, o, [sx, legs + 0.225, 0]), [0.032, 0.016, 0.12], R, 14, 0.014);
     }
   };
-  // stacking chair, the kind set out in rows: four thin legs, the back legs rise into the backrest
+  // stacking chair, the kind set out in rows: tubular steel legs, the back legs rising into the backrest,
+  // a padded seat and back
   const stackChair = (o, R) => {
-    OB(loc(R, o, [0, 0.45, 0]), [0.22, 0.03, 0.21], R, 10);
+    RB(loc(R, o, [0, 0.45, 0]), [0.22, 0.03, 0.21], R, 10, 0.025);
     for (const sx of [-0.19, 0.19]) {
-      OB(loc(R, o, [sx, 0.21, 0.17]), [0.012, 0.21, 0.012], R, 6, B8 | 4);
-      OB(loc(R, o, [sx, 0.45, -0.2]), [0.012, 0.45, 0.012], tiltX(R, 0.06), 6, B8);
+      CYL(loc(R, o, [sx, 0.005, 0.17]), loc(R, o, [sx, 0.43, 0.17]), 0.011, 6, 6);
+      CYL(loc(R, o, [sx, 0.005, -0.19]), loc(R, o, [sx, 0.92, -0.25]), 0.011, 6, 6);
+      CYL(loc(R, o, [sx, 0.41, 0.17]), loc(R, o, [sx, 0.41, -0.19]), 0.009, 6, 6);               // side rail
+      for (const z of [0.17, -0.19]) CYL(loc(R, o, [sx, 0.0, z]), loc(R, o, [sx, 0.012, z]), 0.014, 14, 6, 3);   // glides
     }
-    OB(loc(R, o, [0, 0.79, -0.235]), [0.21, 0.12, 0.02], tiltX(R, 0.06), 10);
+    CYL(loc(R, o, [-0.19, 0.41, 0.17]), loc(R, o, [0.19, 0.41, 0.17]), 0.009, 6, 6);
+    const Rb = tiltX(R, 0.07);
+    RB(loc(R, o, [0, 0.79, -0.235]), [0.205, 0.11, 0.02], Rb, 10, 0.018);
   };
   // office desk: drawer pedestal on the right, side panel on the left, modesty panel,
-  // a beige CRT on a stand and a keyboard
+  // a beige CRT on a stand, a keyboard and a mouse
   const desk = (o, R) => {
-    OB(loc(R, o, [0, 0.74, 0]), [0.7, 0.018, 0.36], R, 9);
-    OB(loc(R, o, [0.48, 0.36, 0]), [0.2, 0.36, 0.33], R, 9, B8 | 4);
+    RB(loc(R, o, [0, 0.74, 0]), [0.7, 0.018, 0.36], R, 9, 0.007);
+    RB(loc(R, o, [0.48, 0.36, 0]), [0.2, 0.36, 0.33], R, 9, 0.005, B8 | 4);
     for (let k = 0; k < 3; k++) {
       const y = 0.6 - k * 0.23;
-      OB(loc(R, o, [0.48, y, 0.335]), [0.185, 0.1, 0.006], R, 15, 32);
-      OB(loc(R, o, [0.48, y + 0.06, 0.345]), [0.05, 0.008, 0.008], R, 6, 32);
+      RB(loc(R, o, [0.48, y, 0.334]), [0.188, 0.105, 0.009], R, 15, 0.005, 32);
+      CYL(loc(R, o, [0.43, y + 0.06, 0.355]), loc(R, o, [0.53, y + 0.06, 0.355]), 0.006, 6, 6, 3);
+      for (const hx of [0.435, 0.525]) CYL(loc(R, o, [hx, y + 0.06, 0.342]), loc(R, o, [hx, y + 0.06, 0.355]), 0.004, 6, 5);
     }
-    OB(loc(R, o, [-0.67, 0.36, 0]), [0.02, 0.36, 0.33], R, 9, B8 | 4);
-    OB(loc(R, o, [-0.19, 0.45, -0.31]), [0.46, 0.25, 0.01], R, 9);
-    OB(loc(R, o, [0, 0.775, -0.14]), [0.11, 0.017, 0.11], R, 16, B8);
-    OB(loc(R, o, [0, 0.96, -0.24]), [0.15, 0.13, 0.13], R, 16, B8);
-    OB(loc(R, o, [0, 0.965, -0.075]), [0.2, 0.175, 0.04], R, 16);
-    OB(loc(R, o, [0, 0.975, -0.033]), [0.16, 0.13, 0.004], R, 13, 32);
-    OB(loc(R, o, [0, 0.77, 0.17]), [0.22, 0.012, 0.075], tiltX(R, -0.05), 16, B8);
+    RB(loc(R, o, [-0.67, 0.36, 0]), [0.02, 0.36, 0.33], R, 9, 0.005, B8 | 4);
+    RB(loc(R, o, [-0.19, 0.45, -0.31]), [0.46, 0.25, 0.01], R, 9, 0.004);
+    // monitor: round foot, neck, rounded bezel, the tapered tube housing behind it, the glass
+    CYL(loc(R, o, [0, 0.758, -0.14]), loc(R, o, [0, 0.772, -0.14]), 0.1, 16, 12, 2, 0.09);
+    RB(loc(R, o, [0, 0.79, -0.15]), [0.05, 0.025, 0.05], R, 16, 0.015, B8);
+    const mo = loc(R, o, [0, 0.965, -0.075]);
+    RB(mo, [0.2, 0.175, 0.035], R, 16, 0.02);
+    HULL(mo, R, [0.185, 0.16], [0.11, 0.1], -0.03, -0.31, -0.02, 16);
+    RB(loc(R, o, [0, 0.975, -0.038]), [0.163, 0.132, 0.004], R, 13, 0.006, 32);
+    // keyboard: a tilted tray with rows of keys, a mouse beside it
+    const Rk = tiltX(R, -0.05), ko = loc(R, o, [0, 0.77, 0.17]);
+    RB(ko, [0.22, 0.012, 0.075], Rk, 16, 0.008, B8);
+    for (let row = 0; row < 4; row++) for (let col = 0; col < 15; col++) {
+      if (row === 3 && col > 3 && col < 11) { if (col === 4) RB(loc(Rk, ko, [0, 0.019, 0.052]), [0.075, 0.006, 0.011], Rk, 16, 0.003, B8 | 32); continue; }
+      OB(loc(Rk, ko, [-0.196 + col * 0.028, 0.019, -0.042 + row * 0.031]), [0.0115, 0.006, 0.0115], Rk, 16, B8 | 32 | 1 | 2);
+    }
+    RB(loc(R, o, [0.33, 0.773, 0.16]), [0.03, 0.016, 0.05], R, 16, 0.015, B8);
   };
   // a door frame sunk s metres into the floor, cut off at floor level (so it can't poke out of the
   // ceiling of the level below)
@@ -436,17 +550,20 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     const R = rot(yaw, pitch, roll), o = [px, y0 + py, pz];
     if (type === ITEM_PART) {                    // partition 1.5 m tall, cut off at the floor if sunk
       const top = 1.5 + py; if (top <= 0.02) return;
-      OB([px, y0 + top / 2, pz], [len, top / 2, 0.035], R, 12, B8);
-      OB([px, y0 + top + 0.012, pz], [len, 0.012, 0.042], R, 6);                 // aluminium cap rail
-      if (py >= 0) OB([px, y0 + 0.05, pz], [len - 0.01, 0.05, 0.04], R, 14, B8); // kick strip
+      RB([px, y0 + top / 2, pz], [len, top / 2, 0.035], R, 12, 0.02, B8);
+      RB([px, y0 + top + 0.012, pz], [len + 0.004, 0.014, 0.042], R, 6, 0.012);  // aluminium cap rail
+      for (const e of [-len, len]) RB(loc(R, [px, y0, pz], [e, top / 2, 0]), [0.012, top / 2, 0.04], R, 6, 0.008, B8);   // end posts
+      if (py >= 0) RB([px, y0 + 0.05, pz], [len - 0.01, 0.05, 0.04], R, 14, 0.006, B8); // kick strip
     } else if (type === ITEM_CHAIR) officeChair(o, R);
     else if (type === ITEM_SEAT) stackChair(o, R);
     else if (type === ITEM_DOOR) {                // a plain door, shut, set against the wall
-      OB(loc(R, o, [0, 1.0, 0.03]), [0.44, 1.0, 0.025], R, 21, B8 | 32);
-      for (const sx of [-0.49, 0.49]) OB(loc(R, o, [sx, 1.04, 0.025]), [0.05, 1.04, 0.025], R, 16, B8 | 32);
-      OB(loc(R, o, [0, 2.12, 0.025]), [0.54, 0.05, 0.025], R, 16, 32);
-      OB(loc(R, o, [0.34, 0.98, 0.075]), [0.025, 0.025, 0.02], R, 6, 32);
-      OB(loc(R, o, [0.34, 0.98, 0.06]), [0.045, 0.06, 0.004], R, 6, 32);
+      RB(loc(R, o, [0, 1.0, 0.03]), [0.44, 1.0, 0.022], R, 21, 0.006, B8 | 32);
+      for (const sx of [-0.49, 0.49]) RB(loc(R, o, [sx, 1.04, 0.025]), [0.05, 1.04, 0.025], R, 16, 0.008, B8 | 32);
+      RB(loc(R, o, [0, 2.12, 0.025]), [0.54, 0.05, 0.025], R, 16, 0.008, 32);
+      CYL(loc(R, o, [0.34, 0.98, 0.052]), loc(R, o, [0.34, 0.98, 0.058]), 0.03, 6, 12, 2);       // rose
+      CYL(loc(R, o, [0.34, 0.98, 0.058]), loc(R, o, [0.34, 0.98, 0.09]), 0.009, 6, 8);          // spindle
+      SPH(loc(R, o, [0.34, 0.98, 0.105]), [0.028, 0.028, 0.022], R, 6);                          // knob
+      for (const hy of [0.25, 1.75]) CYL(loc(R, o, [-0.44, hy - 0.05, 0.055]), loc(R, o, [-0.44, hy + 0.05, 0.055]), 0.008, 6, 6, 3);   // hinges
     }
     else if (type === ITEM_FRAME) { o[1] = y0; frame(o, R, -py); }
     else if (type === ITEM_PILLAR) OB([px, y0 + (py + HEIGHT) / 2, pz], [0.25, (HEIGHT - py) / 2, 0.25], R, 2);
@@ -542,12 +659,23 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     if (fd >= 0) {
       const dx = fd === 0 ? 1 : fd === 1 ? -1 : 0, dz = fd === 2 ? 1 : fd === 3 ? -1 : 0;
       const R = rot(dx > 0 ? Math.PI / 2 : dx < 0 ? -Math.PI / 2 : dz > 0 ? 0 : Math.PI), o = [mx, y0, mz];
-      const n0 = n;
-      for (const sx of [-0.08, 0.08]) OB(loc(R, o, [sx, 0.47, 0]), [0.05, 0.47, 0.055], R, 20, B8);
-      OB(loc(R, o, [0, 1.24, 0]), [0.15, 0.32, 0.075], R, 20);
-      OB(loc(R, o, [0, 1.6, 0.01]), [0.03, 0.05, 0.03], R, 20);
-      OB(loc(R, o, [0, 1.76, 0.03]), [0.085, 0.12, 0.1], tiltX(R, -0.25), 20);
-      for (const sx of [-0.2, 0.2]) OB(loc(R, o, [sx, 0.98, 0]), [0.03, 0.56, 0.03], R, 20);
+      const n0 = n, P = (q) => loc(R, o, q);
+      for (const sx of [-1, 1]) {                                    // legs: thigh, shin, foot
+        CYL(P([sx * 0.08, 0.95, 0]), P([sx * 0.075, 0.5, 0.01]), 0.062, 20, 7, 0, 0.046);
+        CYL(P([sx * 0.075, 0.5, 0.01]), P([sx * 0.07, 0.08, -0.01]), 0.046, 20, 7, 0, 0.034);
+        RB(P([sx * 0.072, 0.035, 0.035]), [0.042, 0.035, 0.11], R, 20, 0.03, B8);
+      }
+      SPH(P([0, 0.95, 0]), [0.155, 0.13, 0.1], R, 20, 5, 8);               // hips
+      SPH(P([0, 1.13, 0.005]), [0.15, 0.17, 0.09], R, 20, 5, 8);           // belly
+      SPH(P([0, 1.34, 0.005]), [0.175, 0.19, 0.1], R, 20, 5, 8);           // chest
+      for (const sx of [-1, 1]) {                                    // shoulders, arms hanging close, long hands
+        SPH(P([sx * 0.175, 1.47, 0]), [0.06, 0.055, 0.055], R, 20, 4, 6);
+        CYL(P([sx * 0.185, 1.47, 0]), P([sx * 0.195, 1.15, -0.01]), 0.045, 20, 6, 0, 0.038);   // arms hang against the body
+        CYL(P([sx * 0.195, 1.15, -0.01]), P([sx * 0.19, 0.86, 0.02]), 0.037, 20, 6, 0, 0.028);
+        SPH(P([sx * 0.19, 0.79, 0.025]), [0.025, 0.08, 0.038], R, 20, 4, 6);
+      }
+      CYL(P([0, 1.48, 0]), P([0, 1.63, 0.02]), 0.045, 20, 7, 0, 0.04);    // neck, a little long
+      SPH(P([0, 1.73, 0.035]), [0.08, 0.115, 0.095], tiltX(R, -0.3), 20, 6, 8);   // head, bowed slightly
       for (let v = n0; v < n; v += FLOATS) { out[v + 3] = mx; out[v + 4] = y0; out[v + 5] = mz; }   // feet, for the vertex shader
     }
     if (ceilHole(seed, lv, x, z, r)) continue;
@@ -609,12 +737,13 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
     else if (t === 4) officeChair([mx, y0 + HEIGHT, mz], rot(yaw, 0, Math.PI));
     else if (t === 5) {                        // four-drawer filing cabinet tilted into the floor
       const R = rot(yaw, 0.25 + 0.3 * p[2], (p[3] - 0.5) * 0.4), o = [mx, y0 + 0.4, mz];
-      OB(o, [0.24, 0.7, 0.32], R, 6);
+      RB(o, [0.24, 0.7, 0.32], R, 6, 0.01);
       for (let k = 0; k < 4; k++) {
         const y = 0.7 - 0.175 - k * 0.35;
-        OB(loc(R, o, [0, y, 0.325]), [0.215, 0.155, 0.006], R, 6, 32);
-        OB(loc(R, o, [0, y + 0.07, 0.338]), [0.06, 0.012, 0.008], R, 14, 32);
-        OB(loc(R, o, [0, y + 0.115, 0.333]), [0.035, 0.018, 0.003], R, 8, 32);      // label card
+        RB(loc(R, o, [0, y, 0.326]), [0.218, 0.158, 0.009], R, 6, 0.006, 32);
+        RB(loc(R, o, [0, y + 0.07, 0.34]), [0.065, 0.014, 0.01], R, 6, 0.006, 32);              // pull
+        RB(loc(R, o, [0, y + 0.115, 0.336]), [0.036, 0.019, 0.002], R, 6, 0.002, 32);           // label holder
+        OB(loc(R, o, [0, y + 0.115, 0.3385]), [0.03, 0.014, 0.0005], R, 8, 32 | 1 | 2 | 4 | 8);   // card
       }
     }
     else if (t === 6) {                        // a door frame standing in the middle of the room
@@ -624,5 +753,28 @@ export function buildLevelChunk(seed, lv, cx, cz, out) {
       OB(loc(R, o, [0, (HEIGHT + 2.05) / 2, 0]), [0.45, (HEIGHT - 2.05) / 2, THICK], R, 2);
     }
   }
-  return n / FLOATS;
+  // glossy triangles last: they are drawn with a second pipeline that adds highlights, so the shader
+  // for walls, carpet and ceiling (most of the screen) stays small enough to run at full speed
+  const nv = n / FLOATS;
+  let w = 0;
+  shinyFrom = 0;
+  if (!part || part.length < out.length) part = new Float32Array(out.length);
+  const TF = 3 * FLOATS;
+  for (let pass = 0; pass < 2; pass++) {
+    for (let t = 0; t < n; t += TF) {
+      if (SHINY[out[t + 6] | 0] !== pass) continue;
+      for (let j = 0; j < TF; j++) part[w + j] = out[t + j];
+      w += TF;
+    }
+    if (pass === 0) shinyFrom = w / FLOATS;
+  }
+  out.set(part.subarray(0, n));
+  return nv;
 }
+// materials drawn with highlights: metal, sign red/white, laminate, glass, black and beige plastic,
+// drawer fronts, pool tile, door paint
+const SHINY = new Uint8Array(32); for (const m of [6, 7, 8, 9, 13, 14, 15, 16, 19, 21]) SHINY[m] = 1;
+let part = null;
+const rbP = new Float64Array(64 * 3);
+// vertex index where the last chunk built by buildLevelChunk switches to glossy materials
+export let shinyFrom = 0;

@@ -1,8 +1,8 @@
 // The renderer: chunk streaming, the scene pass and post-processing. No DOM access, so the same code
 // runs in the browser (main.js) and headless in Node for screenshots (tools/shot.mjs).
 // No allocations in render() apart from what WebGPU itself needs per frame.
-import { CELL, CHUNK, MAX_VERTS, edgeSpan, SALT_H, SALT_V, roomCell } from './gen.js';
-import { FH, buildLevelChunk, levelSeed, levelOf, cellLight } from './levels.js';
+import { CELL, CHUNK, MAX_VERTS, edgeSpan, SALT_H, SALT_V, roomCell, hashU } from './gen.js';
+import { FH, buildLevelChunk, levelSeed, levelOf, cellLight, shinyFrom } from './levels.js';
 import { SCENE } from './shaders.js';
 import { POST } from './post.js';
 
@@ -11,31 +11,36 @@ const HDR = 'rgba16float', DEPTH = 'depth24plus', MSAA = 4, LEVELS = 5;
 // 72 m in every direction, well past where the fog swallows everything. The levels above and below
 // are only seen through holes and stairwells, so they get RANGE2.
 const RANGE = 3, RANGE2 = 1, SLOTS = (2 * RANGE + 1) ** 2 + 2 * (2 * RANGE2 + 1) ** 2, BUILDS_PER_FRAME = 2;
-const FOV = 75 * Math.PI / 180;
+const FOV = 75 * Math.PI / 180, NEAR = 0.05, FAR = 200;
 export const EXPOSURE = 1.0, BLOOM = 0.12, GRAIN = 0.035;
 
 export function createRenderer(device, outFormat, seed) {
   const Q = device.queue, TU = GPUTextureUsage, BU = GPUBufferUsage;
 
-  // ---- chunk streaming: one vertex buffer split into SLOTS fixed-size slots, one chunk per slot ----
-  const SLOT_BYTES = MAX_VERTS * 28;
-  const vbuf = device.createBuffer({ size: SLOT_BYTES * SLOTS, usage: BU.VERTEX | BU.COPY_DST });
+  // ---- chunk streaming: one chunk per slot, each slot with its own vertex buffer, sized to fit (grown
+  // in 256 kB steps and reused while it is big enough), so detailed rooms don't cost every slot memory ----
+  const slotBuf = new Array(SLOTS).fill(null);
   const scratch = new Float32Array(MAX_VERTS * 7);
-  const slotCX = new Int32Array(SLOTS), slotCZ = new Int32Array(SLOTS), slotLV = new Int32Array(SLOTS), slotN = new Int32Array(SLOTS);
+  const slotS = new Int32Array(SLOTS), slotCX = new Int32Array(SLOTS), slotCZ = new Int32Array(SLOTS), slotLV = new Int32Array(SLOTS), slotN = new Int32Array(SLOTS);
   const slotUsed = new Uint8Array(SLOTS);
   const want = new Int32Array(SLOTS * 3);          // chunks still to build (cx, cz, level), nearest first
   let nWant = 0, wantHead = 0, curCX = 1e9, curCZ = 1e9, curLV = 1e9;
   const loadChunk = (slot, cx, cz, lv) => {
     const n = buildLevelChunk(seed, lv, cx, cz, scratch);
-    Q.writeBuffer(vbuf, slot * SLOT_BYTES, scratch, 0, n * 7);
-    slotCX[slot] = cx; slotCZ[slot] = cz; slotLV[slot] = lv; slotN[slot] = n; slotUsed[slot] = 1;
+    const bytes = Math.max(4, n * 28);
+    if (!slotBuf[slot] || slotBuf[slot].size < bytes) {
+      if (slotBuf[slot]) slotBuf[slot].destroy();
+      slotBuf[slot] = device.createBuffer({ size: Math.ceil(bytes / 262144) * 262144, usage: BU.VERTEX | BU.COPY_DST });
+    }
+    if (n) Q.writeBuffer(slotBuf[slot], 0, scratch, 0, n * 7);
+    slotS[slot] = shinyFrom; slotCX[slot] = cx; slotCZ[slot] = cz; slotLV[slot] = lv; slotN[slot] = n; slotUsed[slot] = 1;
   };
   const isLoaded = (cx, cz, lv) => { for (let i = 0; i < SLOTS; i++) if (slotUsed[i] && slotCX[i] === cx && slotCZ[i] === cz && slotLV[i] === lv) return true; return false; };
   // ---- world data the shader reads instead of re-deriving it per pixel: a DATA x DATA cell window
   // around the camera, addressed by world cell mod DATA, for the levels below, at and above the
   // camera (texture rows [0, DATA), [DATA, 2 DATA), [2 DATA, 3 DATA)). Columns [0, DATA) hold the
   // horizontal edge of each cell, [DATA, 2 DATA) the vertical edge (both as edgeSpan floats),
-  // [2 DATA, 3 DATA) the light kind (x) and special room theme + 1 (y).
+  // [2 DATA, 3 DATA) the light kind (x), special room theme + 1 (y), steady brightness (z) and flags (w).
   const DATA = 64;
   const dataArr = new Float32Array(DATA * 3 * DATA * 3 * 4);
   const dataTex = device.createTexture({ size: [DATA * 3, DATA * 3], format: 'rgba32float', usage: TU.TEXTURE_BINDING | TU.COPY_DST });
@@ -49,6 +54,10 @@ export function createRenderer(device, outFormat, seed) {
         edgeSpan(sL, SALT_V, x, z, dataArr, (row + DATA + col) * 4);
         dataArr[(row + 2 * DATA + col) * 4] = cellLight(seed, lv, x, z);
         dataArr[(row + 2 * DATA + col) * 4 + 1] = roomCell(sL, x, z) + 1;      // special room theme + 1 (0: none)
+        // the light's steady brightness (z) and two coin flips (w: 1 tube gone green, 2 hanging panel flickers),
+        // worked out here once instead of per pixel per light in the shader
+        dataArr[(row + 2 * DATA + col) * 4 + 2] = 0.82 + 0.18 * ((hashU(sL, 306, x, z) >>> 8) / 16777216);
+        dataArr[(row + 2 * DATA + col) * 4 + 3] = (hashU(sL, 313, x, z) & 1) + 2 * (hashU(sL, 305, x, z) & 1);
       }
     }
     Q.writeTexture({ texture: dataTex }, dataArr, { bytesPerRow: DATA * 3 * 16 }, [DATA * 3, DATA * 3]);
@@ -67,7 +76,9 @@ export function createRenderer(device, outFormat, seed) {
     }
   };
   const pump = (limit) => {
+    const t0 = performance.now();
     for (let k = 0; k < limit && wantHead < nWant; k++, wantHead++) {
+      if (k > 0 && limit < SLOTS && performance.now() - t0 > 6) break;   // a furnished chunk can take ~10 ms: one per frame then
       let slot = 0; while (slotUsed[slot]) slot++;
       loadChunk(slot, want[wantHead * 3], want[wantHead * 3 + 1], want[wantHead * 3 + 2]);
     }
@@ -84,33 +95,36 @@ export function createRenderer(device, outFormat, seed) {
   const UB = new Float32Array(28);
   const ubo = device.createBuffer({ size: UB.byteLength, usage: BU.UNIFORM | BU.COPY_DST });
   const sceneMod = device.createShaderModule({ code: SCENE });
-  const scenePipe = device.createRenderPipeline({
+  const scenePipeDesc = (shiny) => ({
     layout: 'auto',
     vertex: { module: sceneMod, entryPoint: 'vs', buffers: [{ arrayStride: 28, attributes: [
       { shaderLocation: 0, offset: 0, format: 'float32x3' },
       { shaderLocation: 1, offset: 12, format: 'float32x3' },
       { shaderLocation: 2, offset: 24, format: 'float32' }] }] },
-    fragment: { module: sceneMod, entryPoint: 'fs', targets: [{ format: HDR }] },
+    fragment: { module: sceneMod, entryPoint: 'fs', targets: [{ format: HDR }], constants: { SHINY: shiny ? 1 : 0 } },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: DEPTH, depthWriteEnabled: true, depthCompare: 'less' },
     multisample: { count: MSAA },
   });
+  // two pipelines from one shader: everything, then glossy materials again with highlights (see levels.js)
+  const scenePipe = device.createRenderPipeline(scenePipeDesc(false)), shinyPipe = device.createRenderPipeline(scenePipeDesc(true));
   const sceneBG = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: dataTex.createView() }] });
+  const shinyBG = device.createBindGroup({ layout: shinyPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: dataTex.createView() }] });
 
   // ---- post pipelines ----
   const postMod = device.createShaderModule({ code: POST });
   const ADD = { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } };
   const postPipe = (entry, format, blend) => device.createRenderPipeline({ layout: 'auto',
     vertex: { module: postMod, entryPoint: 'vs' }, fragment: { module: postMod, entryPoint: entry, targets: [{ format, blend }] } });
-  const pPre = postPipe('fsPre', HDR), pDown = postPipe('fsDown', HDR), pUp = postPipe('fsUp', HDR, ADD), pFinal = postPipe('fsFinal', outFormat);
+  const pAO = postPipe('fsAO', 'rg16float'), pBlur = postPipe('fsBlur', 'rg16float'), pPre = postPipe('fsPre', HDR), pDown = postPipe('fsDown', HDR), pUp = postPipe('fsUp', HDR, ADD), pFinal = postPipe('fsFinal', outFormat);
   const smp = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
-  const PU = new Float32Array(8);
-  const puBuf = device.createBuffer({ size: 32, usage: BU.UNIFORM | BU.COPY_DST });
+  const PU = new Float32Array(12);
+  const puBuf = device.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
 
   // ---- size-dependent targets and the pass list; rebuilt only on resize ----
   let W = 0, H = 0, textures = [];
   const msaaAtt = { view: null, resolveTarget: null, loadOp: 'clear', storeOp: 'discard', clearValue: { r: 0, g: 0, b: 0, a: 1 } };
-  const depthAtt = { view: null, depthLoadOp: 'clear', depthStoreOp: 'discard', depthClearValue: 1 };
+  const depthAtt = { view: null, depthLoadOp: 'clear', depthStoreOp: 'store', depthClearValue: 1 };   // kept: the AO pass reads it
   const scenePass = { colorAttachments: [msaaAtt], depthStencilAttachment: depthAtt };
   const finalAtt = { view: null, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } };
   const finalPass = { colorAttachments: [finalAtt] };
@@ -121,24 +135,29 @@ export function createRenderer(device, outFormat, seed) {
     for (const t of textures) t.destroy();
     const mk = (tw, th, format, usage, sampleCount = 1) => { const t = device.createTexture({ size: [tw, th], format, usage, sampleCount }); textures.push(t); return t; };
     textures = [];
-    const msaa = mk(W, H, HDR, TU.RENDER_ATTACHMENT, MSAA), depth = mk(W, H, DEPTH, TU.RENDER_ATTACHMENT, MSAA);
+    const msaa = mk(W, H, HDR, TU.RENDER_ATTACHMENT, MSAA), depth = mk(W, H, DEPTH, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING, MSAA);
     const hdr = mk(W, H, HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING);
     msaaAtt.view = msaa.createView(); msaaAtt.resolveTarget = hdr.createView(); depthAtt.view = depth.createView();
     const lv = [];
     for (let i = 0; i < LEVELS; i++) lv.push(mk(Math.max(1, W >> (i + 1)), Math.max(1, H >> (i + 1)), HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING).createView());
     const bg = (pipe, view) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: view }, { binding: 1, resource: smp }] });
     const pass = (view, load) => ({ colorAttachments: [{ view, loadOp: load ? 'load' : 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
-    blits = [{ pass: pass(lv[0]), pipe: pPre, bg: bg(pPre, msaaAtt.resolveTarget) }];
+    const hw = Math.max(1, W >> 1), hh = Math.max(1, H >> 1);
+    const ao0 = mk(hw, hh, 'rg16float', TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING).createView(), ao1 = mk(hw, hh, 'rg16float', TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING).createView();
+    blits = [
+      { pass: pass(lv[0]), pipe: pPre, bg: device.createBindGroup({ layout: pPre.getBindGroupLayout(0), entries: [{ binding: 0, resource: msaaAtt.resolveTarget }, { binding: 1, resource: smp }, { binding: 3, resource: { buffer: puBuf } }, { binding: 5, resource: depthAtt.view }] }) },
+      { pass: pass(ao0), pipe: pAO, bg: device.createBindGroup({ layout: pAO.getBindGroupLayout(0), entries: [{ binding: 0, resource: lv[0] }, { binding: 3, resource: { buffer: puBuf } }] }) },
+      { pass: pass(ao1), pipe: pBlur, bg: device.createBindGroup({ layout: pBlur.getBindGroupLayout(0), entries: [{ binding: 4, resource: ao0 }] }) }];
     for (let i = 1; i < LEVELS; i++) blits.push({ pass: pass(lv[i]), pipe: pDown, bg: bg(pDown, lv[i - 1]) });
     for (let i = LEVELS - 2; i >= 0; i--) blits.push({ pass: pass(lv[i], true), pipe: pUp, bg: bg(pUp, lv[i + 1]) });
     finalBG = device.createBindGroup({ layout: pFinal.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: msaaAtt.resolveTarget }, { binding: 1, resource: smp }, { binding: 2, resource: lv[0] }, { binding: 3, resource: { buffer: puBuf } }] });
+      { binding: 0, resource: msaaAtt.resolveTarget }, { binding: 1, resource: smp }, { binding: 2, resource: lv[0] }, { binding: 3, resource: { buffer: puBuf } }, { binding: 4, resource: ao1 }] });
   }
 
   // view-projection matrix, column-major, WebGPU depth range 0..1
   const P = new Float32Array(16), V = new Float32Array(16);
   function matrices(ex, ey, ez, yaw, pitch, fov) {
-    const f = 1 / Math.tan(fov / 2), near = 0.05, far = 200;
+    const f = 1 / Math.tan(fov / 2), near = NEAR, far = FAR;
     P.fill(0); P[0] = f / (W / H); P[5] = f; P[10] = far / (near - far); P[11] = -1; P[14] = near * far / (near - far);
     const cp = Math.cos(pitch), fx = Math.sin(yaw) * cp, fy = Math.sin(pitch), fz = -Math.cos(yaw) * cp;
     const rx = Math.cos(yaw), rz = Math.sin(yaw);                        // right = forward x world-up
@@ -161,19 +180,24 @@ export function createRenderer(device, outFormat, seed) {
     UB[24] = curLV; UB[25] = levelSeed(seed, curLV - 1); UB[26] = levelSeed(seed, curLV); UB[27] = levelSeed(seed, curLV + 1);
     Q.writeBuffer(ubo, 0, UB);
     PU[0] = time; PU[1] = EXPOSURE; PU[2] = BLOOM; PU[3] = GRAIN; PU[4] = look.camcorder ? 1 : 0; PU[5] = look.exposure;
+    const th = Math.tan((cam.fov || FOV) / 2); PU[8] = th * W / H; PU[9] = th; PU[10] = NEAR; PU[11] = FAR;
     Q.writeBuffer(puBuf, 0, PU);
 
     const enc = device.createCommandEncoder();
     let pass = enc.beginRenderPass(scenePass);
-    pass.setPipeline(scenePipe); pass.setBindGroup(0, sceneBG); pass.setVertexBuffer(0, vbuf);
+    pass.setPipeline(scenePipe); pass.setBindGroup(0, sceneBG);
     // skip chunks entirely behind the camera (their centre more than a half-diagonal behind)
     const fx = Math.sin(cam.yaw), fz = -Math.cos(cam.yaw), half = CHUNK * CELL * 0.5;
     let verts = 0;
-    for (let i = 0; i < SLOTS; i++) {
-      if (!slotUsed[i]) continue;
-      const vx = (slotCX[i] * CHUNK * CELL + half) - cam.x, vz = (slotCZ[i] * CHUNK * CELL + half) - cam.z;
-      if (vx * fx + vz * fz < -half * 1.42) continue;
-      pass.draw(slotN[i], 1, i * MAX_VERTS); verts += slotN[i];
+    for (let k = 0; k < 2; k++) {
+      if (k === 1) { pass.setPipeline(shinyPipe); pass.setBindGroup(0, shinyBG); }
+      for (let i = 0; i < SLOTS; i++) {
+        if (!slotUsed[i] || !slotN[i]) continue;
+        const vx = (slotCX[i] * CHUNK * CELL + half) - cam.x, vz = (slotCZ[i] * CHUNK * CELL + half) - cam.z;
+        if (vx * fx + vz * fz < -half * 1.42) continue;
+        const a = k ? slotS[i] : 0, b = k ? slotN[i] : slotS[i];
+        if (b > a) { pass.setVertexBuffer(0, slotBuf[i]); pass.draw(b - a, 1, a); verts += b - a; }
+      }
     }
     pass.end();
     for (let i = 0; i < blits.length; i++) {

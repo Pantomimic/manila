@@ -10,6 +10,8 @@ struct U { vp: mat4x4f, cam: vec4f, misc: vec4f, lv: vec4f };  // cam.xyz eye, c
 // one band of rows per level (below, at, above the camera's)
 @group(0) @binding(1) var world: texture_2d<f32>;
 
+// true in the second scene pipeline, which draws only glossy materials and adds highlights
+override SHINY: bool = false;
 const CELL = ${CELL.toFixed(1)};
 const HEIGHT = ${HEIGHT.toFixed(2)};
 const FH = ${FH.toFixed(2)};
@@ -60,10 +62,12 @@ fn lightKind(c: vec2i) -> i32 { if (!gOk) { return 0; } return i32(textureLoad(w
 fn cellData(c: vec2i) -> vec2i { if (!gOk) { return vec2i(0); } let t = textureLoad(world, cellTexel(c.x, c.y) + vec2i(128, 0), 0); return vec2i(i32(t.x + 0.5), i32(t.y + 0.5) - 1); }
 // special room theme of a cell (gen.js roomCell), -1 for none
 fn cellRoom(c: vec2i) -> i32 { if (!gOk) { return -1; } return i32(textureLoad(world, cellTexel(c.x, c.y) + vec2i(128, 0), 0).y + 0.5) - 1; }
-fn lightLevel(c: vec2i, kind: i32) -> f32 {
+// light kind, room theme + 1, steady brightness, flags (render.js fillData)
+fn cellTex(c: vec2i) -> vec4f { if (!gOk) { return vec4f(0.0); } return textureLoad(world, cellTexel(c.x, c.y) + vec2i(128, 0), 0); }
+fn lightLevel(c: vec2i, kind: i32) -> f32 { let t = cellTex(c); return lightLevelT(c, kind, t.z, t.w); }
+fn lightLevelT(c: vec2i, kind: i32, base: f32, flags: f32) -> f32 {
   if (kind == 0) { return 0.0; }
-  let base = 0.82 + 0.18 * unit(hc(306u, c));
-  if (kind != 2 && !(kind == 4 && (hc(305u, c) & 1u) == 1u)) { return base; }
+  if (kind != 2 && !(kind == 4 && flags >= 1.5)) { return base; }
   let t = u.cam.w;
   let ph = unit(hc(307u, c)) * 64.0;
   let C = vec2u(bitcast<u32>(c.x), bitcast<u32>(c.y));
@@ -129,14 +133,23 @@ fn fbm(p: vec2f) -> f32 { return vnoise(p) * 0.5 + vnoise(p * 2.03 + 17.0) * 0.3
 // g = grime 0..1: some stretches of wall are nearly clean, others badly water damaged
 fn wallpaper(along: f32, y: f32, side: f32, d: f32, g: f32) -> vec3f {
   var c = vec3f(0.74, 0.64, 0.33) * (1.04 - 0.08 * g);
+  // hung in 53 cm rolls: each roll a shade off the next, the pattern not quite matched at the seam
+  let roll = floor(along / 0.53 + side * 0.37);
+  let rh = h2(vec2i(i32(roll), i32(side * 7.0) + 40));
+  c *= 0.975 + 0.05 * rh;
   let s = along / 0.16;
+  let yv = y + (rh - 0.5) * 0.03;
   let aa = clamp(1.0 - d * 12.0, 0.0, 1.0);
   let line = 1.0 - smoothstep(0.015, 0.04, abs(fract(s) - 0.5));        // thin vertical pinstripe
   c *= 1.0 - line * 0.09 * aa;
   let du = abs(fract(s) - 0.5) * 0.16;                                    // small diamonds between stripes
-  let dv = abs(fract(y / 0.32 + 0.5 * floor(s)) - 0.5) * 0.32;
+  let dv = abs(fract(yv / 0.32 + 0.5 * floor(s)) - 0.5) * 0.32;
   let dia = 1.0 - smoothstep(0.022, 0.03, (0.08 - du) * 1.2 + dv * 0.5);
-  c *= 1.0 - dia * 0.07 * aa;
+  // the print is embossed: lit from above, the top edge of each diamond catches light, the bottom is shaded
+  let dvU = abs(fract((yv + 0.006) / 0.32 + 0.5 * floor(s)) - 0.5) * 0.32;
+  let diaU = 1.0 - smoothstep(0.022, 0.03, (0.08 - du) * 1.2 + dvU * 0.5);
+  c *= 1.0 - dia * 0.06 * aa + (dia - diaU) * 0.08 * clamp(1.0 - d * 60.0, 0.0, 1.0);
+  c *= 1.0 + (vnoise(vec2f(along * 3.0, yv * 3.0) + side * 9.0) - 0.5) * 0.05;   // uneven print
   let n = fbm(vec2f(along * 0.9 + side * 31.0, y * 0.9));
   let sv = n * 0.85 + (y - HEIGHT + 0.8) * 0.45 + (g - 0.5) * 0.45;       // water damage from the ceiling
   let stain = smoothstep(0.5, 0.78, sv) * smoothstep(0.08, 0.4, g);
@@ -150,17 +163,37 @@ fn wallpaper(along: f32, y: f32, side: f32, d: f32, g: f32) -> vec3f {
   let streak = smoothstep(0.72, 0.9, vnoise(vec2f(along * 5.0 + side * 7.0, y * 0.35))) * smoothstep(0.6, 2.2, y);
   c = mix(c, c * vec3f(0.80, 0.72, 0.55), streak * 0.6 * g);
   c *= 1.0 - 0.22 * (1.0 - smoothstep(0.0, 0.6, y)) * n * (0.3 + 0.7 * g);                  // scuffs low on the wall
+  let sx = abs(fract(along / 0.53 + side * 0.37 + 0.5) - 0.5) * 0.53;      // distance to the nearest seam
+  let sf = clamp(1.0 - d * 150.0, 0.0, 1.0);
+  c *= 1.0 - 0.12 * (1.0 - smoothstep(0.0008, 0.0026, sx)) * sf;            // the seam line
+  c *= 1.0 + 0.06 * smoothstep(0.6, 0.9, g) * (1.0 - smoothstep(0.001, 0.004, sx)) * smoothstep(1.6, 2.6, y) * sf;   // lifting where it's damp
+  c *= 1.0 + (vnoise(vec2f(along, y) * 260.0) - 0.5) * 0.06 * clamp(1.0 - d * 260.0, 0.0, 1.0);   // paper grain
   if (y < 0.09) { c = vec3f(0.30, 0.23, 0.14) * (0.85 + 0.3 * smoothstep(0.07, 0.09, y)); }   // baseboard
   return c;
 }
 
+// commercial loop-pile carpet: every tuft (4 mm) its own shade with the odd dark or pale fibre, faint
+// tufting rows, patches where the pile lies differently, damp patches, and old stains with darker rims
 fn carpet(p: vec2f, d: f32, g: f32) -> vec3f {
   var c = vec3f(0.52, 0.42, 0.21);
-  let fiber = vnoise(p * 45.0) - 0.5;
-  c *= 1.0 + fiber * 0.22 * clamp(1.0 - d * 40.0, 0.0, 1.0);
-  c *= 0.88 + fbm(p * 0.7) * 0.24;
-  let damp = smoothstep(0.6, 0.7, fbm(p * 0.12 + 5.0) + (g - 0.5) * 0.25);                  // damp patches
-  return mix(c, c * vec3f(0.62, 0.64, 0.46), damp * 0.85);
+  let near = clamp(1.6 - d * 400.0, 0.0, 1.0);                           // tufts fade before they'd shimmer
+  if (near > 0.0) {
+    let t = vec2i(floor(p * 250.0));
+    let a = h2(t); let b = h2(t + vec2i(7919, 104729));
+    var k = 1.0 + (a - 0.5) * 0.42;
+    if (b < 0.06) { k *= 0.62; } else if (b > 0.97) { k *= 1.25; }
+    c *= mix(1.0, k * (0.97 + 0.06 * step(0.5, fract(p.x * 125.0))), near);   // (rows: every other tuft line)
+  }
+  let mid = clamp(1.0 - d * 40.0, 0.0, 1.0);
+  c *= 1.0 + (vnoise(p * 45.0) - 0.5) * 0.18 * mid;
+  c *= 0.86 + fbm(p * 0.7) * 0.26;
+  c *= 0.95 + 0.1 * smoothstep(0.3, 0.7, vnoise(p * 2.3 + 31.0));          // pile brushed one way or the other
+  let damp = smoothstep(0.6, 0.7, fbm(p * 0.12 + 5.0) + (g - 0.5) * 0.25);  // damp patches
+  c = mix(c, c * vec3f(0.62, 0.64, 0.46), damp * 0.85);
+  let sv = fbm(p * 1.7 + 77.0) + g * 0.1;                                    // spilled-on stains, here and there
+  let st = smoothstep(0.76, 0.785, sv) * smoothstep(0.6, 0.75, vnoise(p * 0.13 + 9.0));
+  let rim = st * (1.0 - smoothstep(0.785, 0.82, sv));
+  return c * (1.0 - 0.16 * st - 0.14 * rim);
 }
 
 // small square tiles (15 cm), pale aqua-white, grout lines, grime in the joints
@@ -180,6 +213,17 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
   var c = vec3f(0.70, 0.66, 0.52) * (0.92 + h2(tile) * 0.1);
   let missing = !hall && tileMissing(lv, tile);   // (pw is folded in the hallway: no tile is missing there anyway)
   c *= 0.95 + vnoise(p * 30.0) * 0.1 * clamp(1.0 - d * 30.0, 0.0, 1.0);   // pitted acoustic tile
+  // fissured mineral fibre: short wormy grooves and pinholes, different on every tile
+  let fd = clamp(1.4 - d * 90.0, 0.0, 1.0);
+  if (fd > 0.0) {
+    let o = vec2f(h2(tile + vec2i(3, 9)), h2(tile + vec2i(11, 5))) * 50.0;
+    let w = vnoise(p * 24.0 + o);
+    let fis = (1.0 - smoothstep(0.015, 0.075, abs(w - 0.5))) * smoothstep(0.58, 0.72, vnoise(p * 13.0 - o));
+    let q = p * 70.0; let pc = vec2i(floor(q));
+    let jit = vec2f(h2(pc), h2(pc + vec2i(5, 3))) - 0.5;
+    let pin = (1.0 - smoothstep(0.1, 0.2, length(fract(q) - 0.5 - jit * 0.5))) * step(h2(pc + vec2i(9, 1)), 0.4);
+    c *= 1.0 - (0.16 * fis + 0.22 * pin) * fd;
+  }
   if (h2(tile + vec2i(913, 71)) < 0.005 + 0.07 * g) {                                  // the odd stained tile
     let q = fract(p / 0.6) - 0.5 + (vec2f(vnoise(p * 6.0), vnoise(p * 6.0 + 9.0)) - 0.5) * 0.35;
     c = mix(c, c * vec3f(0.80, 0.70, 0.52), smoothstep(0.40, 0.12, length(q)));
@@ -192,6 +236,7 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
     c = select(vec3f(0.5, 0.5, 0.47), mix(vec3f(0.04), vec3f(0.46, 0.46, 0.43), step(0.5, fract(t.y * 9.0))), inner);
   }
   let gr = min(min(t.x, 1.0 - t.x), min(t.y, 1.0 - t.y)) * 0.6;           // metal grid between tiles
+  c *= 0.84 + 0.16 * smoothstep(0.012, 0.05, gr);                           // tile edge sits back in shadow
   return mix(vec3f(0.55, 0.54, 0.50), c, smoothstep(0.008, 0.012 + d, gr));
 }
 
@@ -270,9 +315,10 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
   for (var dz = -1; dz <= 1; dz++) {
     for (var dx = -1; dx <= 1; dx++) {
       let c = fo + vec2i(dx, dz);
-      let cd = cellData(c);
+      let ct = cellTex(c);
+      let cd = vec2i(i32(ct.x + 0.5), i32(ct.y + 0.5) - 1);
       let kind = cd.x;
-      var level = lightLevel(c, kind);
+      var level = lightLevelT(c, kind, ct.z, ct.w);
       if (cd.y == 10 && level > 0.0) { level = 0.9; }                     // hallway: every light the same
       if (cd.y == 11 && any(c != camC)) { continue; }                     // follow room: only yours is on
       if (level <= 0.0) { continue; }
@@ -293,12 +339,30 @@ fn ceiling(pw: vec2f, d: f32, g: f32, lv: i32, hall: bool) -> vec3f {
       let hz = dot(v.xz, v.xz) / (1.5 * CELL * 1.5 * CELL);           // fades to 0 before the 3x3 window ends
       let win = max(1.0 - hz, 0.0);
       var tint = select(vec3f(1.0, 0.97, 0.86), vec3f(0.93, 1.0, 0.95), kind == 3);   // bare tubes run cold and green
-      tint = mix(tint, vec3f(0.86, 1.0, 0.78), 0.3 * mu * f32(hc(313u, c) & 1u));      // far out, some tubes have gone green
+      tint = mix(tint, vec3f(0.86, 1.0, 0.78), 0.3 * mu * f32(i32(ct.w + 0.5) & 1));      // far out, some tubes have gone green
       if (cd.y == 6) { tint = vec3f(1.0, 0.12, 0.06); }                        // red room
-      light += tint * (3.6 * level * vis * ndl * win * win / (d2 + 0.8));
+      let I = tint * (3.6 * level * vis * win * win / (d2 + 0.8));
+      light += I * ndl;
     }
   }
   var col = albedo * light;
+  // highlights (worked out after the light loop: anything kept alive through it slows it down).
+  // ks: strength per material; carpet, ceiling tile and fabric stay matte. One tightness for all
+  // (x^32 by squaring: a pow with a varying exponent cost several ms here).
+  var ks = 0.0;
+  if (i.m > 5.5 && i.m < 9.5) { ks = select(0.12, 0.3, i.m < 6.5); }          // painted metal; sign enamel
+  if ((i.m > 8.5 && i.m < 9.5) || (i.m > 14.5 && i.m < 15.5)) { ks = 0.16; }  // laminate
+  if (i.m > 12.5 && i.m < 14.5) { ks = select(0.22, 0.6, i.m < 13.5); }       // glass; black plastic
+  if (i.m > 15.5 && i.m < 16.5) { ks = 0.1; }                                 // beige plastic
+  if (i.m > 20.5) { ks = 0.08; }                                              // door paint
+  if ((i.m > 18.5 && i.m < 19.5) || (room == 9 && (i.m < 0.5 || (i.m > 1.5 && i.m < 2.5)))) { ks = 0.3; }   // glazed tile
+  if (SHINY && ks > 0.0 && !wet) {   // from the panel over this spot, as bright as the light arriving here
+    let L = normalize(vec3f((f32(f.x) + 0.5) * CELL, HEIGHT - 0.05, (f32(f.y) + 0.5) * CELL) - i.wp);
+    var h = max(dot(n, normalize(L + vd)), 0.0);
+    h *= h; h *= h; h *= h; h *= h; h *= h;
+    let fr = 1.0 - clamp(dot(n, vd), 0.0, 1.0);
+    col += light * (ks * h * 1.6 * (1.0 + 2.0 * fr * fr * fr));
+  }
   if (wet) {                                           // standing water: a rippled mirror of the ceiling panels
     var r = vec3f(-vd.x, vd.y, -vd.z);
     let rip = sin(i.wp.xz * vec2f(9.0, 11.0) + u.cam.w * vec2f(0.7, -0.5) + i.wp.zx * 5.0) * 0.012;
