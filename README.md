@@ -9,7 +9,8 @@ seed is a different building, and it goes on forever in every direction, includi
 Everything, from the walls to the sound, is generated in code from one number. There are no
 textures, models or recordings. The whole game is a single HTML file of about 115 kB.
 
-**Play it:** [pantomimic.itch.io/manila](https://pantomimic.itch.io/manila) (needs WebGPU).
+**Play it:** [pantomimic.itch.io/manila](https://pantomimic.itch.io/manila) or
+[pantomimic.github.io/manila](https://pantomimic.github.io/manila/) (needs WebGPU).
 
 ![An office floor with rows of desks, beige CRTs and office chairs under fluorescent panels](docs/shots/office.jpg)
 
